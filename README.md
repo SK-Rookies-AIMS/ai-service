@@ -15,14 +15,96 @@ FastAPI 기반 AI 서비스 API Gateway / Orchestrator입니다.
 
 ```text
 ai-service/
-├── app/
-│   ├── main.py
-│   └── routers/
-│       └── health.py
-├── main.py
-├── requirements.txt
-└── README.md
+├─ app/
+│  ├─ core/
+│  │  ├─ config.py
+│  │  ├─ exceptions.py
+│  │  └─ logging.py
+│  ├─ api/
+│  │  ├─ router.py
+│  │  └─ routers/
+│  │     ├─ health.py
+│  │     └─ root.py
+│  ├─ service/
+│  │  ├─ orchestrator/
+│  │  ├─ llm/
+│  │  └─ analysis/
+│  ├─ ml/
+│  │  ├─ datasets/
+│  │  ├─ preprocessing/
+│  │  ├─ features/
+│  │  ├─ training/
+│  │  ├─ evaluation/
+│  │  ├─ inference/
+│  │  ├─ registry/
+│  │  └─ artifacts/
+│  ├─ kafka/
+│  ├─ dto/
+│  │  ├─ request/
+│  │  └─ response/
+│  │     └─ common_response.py
+│  ├─ utils/
+│  │  ├─ datetime_utils.py
+│  │  ├─ json_utils.py
+│  │  └─ response_utils.py
+│  └─ main.py
+├─ main.py
+├─ requirements.txt
+└─ README.md
 ```
+
+### 패키지 역할
+
+- `app/core/config.py`: `.env` 기반 애플리케이션 설정 관리
+- `app/core/logging.py`: 공통 로깅 설정
+- `app/core/exceptions.py`: 공통 예외 클래스 및 FastAPI 예외 핸들러 등록
+- `app/api/router.py`: 전체 API 라우터 집계
+- `app/api/routers`: 기능별 FastAPI 라우터 모듈
+- `app/api/routers/root.py`: 루트 상태 응답 라우터
+- `app/api/routers/health.py`: 헬스 체크 라우터
+- `app/service/orchestrator`: ChatGPT API, AI 매뉴얼 API, colleague-skill 연계 흐름 제어
+- `app/service/llm`: LLM API 연동 및 프롬프트 처리
+- `app/service/analysis`: 요청 분석, 응답 후처리, 분석 로직
+- `app/ml/datasets`: 학습 및 평가 데이터셋 관리
+- `app/ml/preprocessing`: 데이터 전처리 로직
+- `app/ml/features`: 피처 생성 및 변환 로직
+- `app/ml/training`: 모델 학습 로직
+- `app/ml/evaluation`: 모델 평가 로직
+- `app/ml/inference`: 모델 추론 로직
+- `app/ml/registry`: 모델 버전 및 메타데이터 관리
+- `app/ml/artifacts`: 모델 산출물 및 관련 파일 관리
+- `app/kafka`: Kafka 메시지 발행 및 구독 연동
+- `app/dto/request`: 요청 DTO 정의
+- `app/dto/response/common_response.py`: 공통 API 응답 DTO 정의
+- `app/utils/datetime_utils.py`: UTC 날짜/시간 공통 함수
+- `app/utils/json_utils.py`: JSON 직렬화 및 역직렬화 공통 함수
+- `app/utils/response_utils.py`: 공통 성공/실패 응답 생성 함수
+
+## 공통 응답 형식
+
+모든 API 응답은 아래 구조를 기본 형식으로 사용합니다.
+
+```json
+{
+  "success": true,
+  "data": {},
+  "message": "로그인 성공",
+  "timestamp": "2026-06-08T16:00:00"
+}
+```
+
+필드 설명:
+
+- `success`: 요청 성공 여부
+- `data`: 응답 데이터
+- `message`: 응답 메시지
+- `timestamp`: 응답 생성 시간
+
+관련 코드:
+
+- `app/dto/response/common_response.py`: `CommonResponse` DTO
+- `app/utils/response_utils.py`: `success_response`, `error_response` 헬퍼
+
 
 ## 가상환경 생성 및 실행
 
@@ -44,6 +126,10 @@ python -m venv venv
 ```powershell
 pip install -r requirements.txt
 ```
+
+`requirements.txt`에는 FastAPI, LLM/API 연동, Kafka, 데이터 처리, ML 관련 의존성을 모두 포함합니다.
+
+Windows에서 Python 3.14를 사용하는 경우 일부 패키지의 사전 빌드 wheel이 없으면 `pydantic-core`, `orjson`, `pandas`, `scipy`, `scikit-learn` 등이 소스 빌드를 시도할 수 있습니다. 이 경우 Visual Studio Build Tools가 필요할 수 있으므로, 설치 문제가 반복되면 Python 3.12 또는 3.13 사용을 권장합니다.
 
 개발 서버 실행:
 
@@ -157,4 +243,3 @@ FastAPI
 - 모든 요청 흐름은 FastAPI를 통해 중앙 집중적으로 처리됩니다.
 - Kubernetes 환경에서는 `ai-services` Namespace 내 Pod로 배포됩니다.
 - 향후 AI 서비스 추가 시 FastAPI에서 Orchestration만 확장하면 되므로 확장성이 높습니다.
-
