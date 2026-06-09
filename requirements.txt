@@ -1,3 +1,31 @@
+# FastAPI runtime
 fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
+uvicorn[standard]>=0.32.0
 
+pydantic>=2.13.0,<3.0.0
+pydantic-settings>=2.12.0,<3.0.0
+python-dotenv>=1.0.1,<2.0.0
+
+# LLM & External API
+httpx>=0.28.0
+openai>=1.59.0,<2.0.0
+
+# Kafka
+aiokafka>=0.12.0
+confluent-kafka>=2.6.0
+
+# Data Processing
+pandas>=2.2.0
+numpy>=1.26.0
+scipy>=1.13.0
+
+# Machine Learning
+joblib>=1.4.0
+scikit-learn>=1.5.0
+lightgbm>=4.5.0
+xgboost>=2.1.0
+shap>=0.46.0
+
+# Common
+orjson>=3.10.0
+loguru>=0.7.0,<0.8.0

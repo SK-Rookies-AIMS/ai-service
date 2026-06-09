@@ -15,14 +15,55 @@ FastAPI 기반 AI 서비스 API Gateway / Orchestrator입니다.
 
 ```text
 ai-service/
-├── app/
-│   ├── main.py
-│   └── routers/
-│       └── health.py
-├── main.py
-├── requirements.txt
-└── README.md
+├─ app/
+│  ├─ core/
+│  ├─ api/
+│  │  └─ routers/
+│  ├─ service/
+│  │  ├─ orchestrator/
+│  │  ├─ llm/
+│  │  └─ analysis/
+│  ├─ ml/
+│  │  ├─ datasets/
+│  │  ├─ preprocessing/
+│  │  ├─ features/
+│  │  ├─ training/
+│  │  ├─ evaluation/
+│  │  ├─ inference/
+│  │  ├─ registry/
+│  │  └─ artifacts/
+│  ├─ kafka/
+│  ├─ dto/
+│  │  ├─ request/
+│  │  └─ response/
+│  ├─ utils/
+│  └─ main.py
+├─ main.py
+├─ requirements.txt
+└─ README.md
 ```
+
+### 패키지 역할
+
+- `app/core`: 환경 설정, 공통 설정, 애플리케이션 초기화 구성
+- `app/api`: FastAPI API 라우터 집계 및 HTTP API 구성
+- `app/api/routers`: 기능별 FastAPI 라우터 모듈
+- `app/service/orchestrator`: ChatGPT API, AI 매뉴얼 API, colleague-skill 연계 흐름 제어
+- `app/service/llm`: LLM API 연동 및 프롬프트 처리
+- `app/service/analysis`: 요청 분석, 응답 후처리, 분석 로직
+- `app/ml/datasets`: 학습 및 평가 데이터셋 관리
+- `app/ml/preprocessing`: 데이터 전처리 로직
+- `app/ml/features`: 피처 생성 및 변환 로직
+- `app/ml/training`: 모델 학습 로직
+- `app/ml/evaluation`: 모델 평가 로직
+- `app/ml/inference`: 모델 추론 로직
+- `app/ml/registry`: 모델 버전 및 메타데이터 관리
+- `app/ml/artifacts`: 모델 산출물 및 관련 파일 관리
+- `app/kafka`: Kafka 메시지 발행 및 구독 연동
+- `app/dto/request`: 요청 DTO 정의
+- `app/dto/response`: 응답 DTO 정의
+- `app/utils`: 공통 유틸리티 함수
+
 
 ## 가상환경 생성 및 실행
 
@@ -44,6 +85,10 @@ python -m venv venv
 ```powershell
 pip install -r requirements.txt
 ```
+
+`requirements.txt`에는 FastAPI, LLM/API 연동, Kafka, 데이터 처리, ML 관련 의존성을 모두 포함합니다.
+
+Windows에서 Python 3.14를 사용하는 경우 일부 패키지의 사전 빌드 wheel이 없으면 `pydantic-core`, `orjson`, `pandas`, `scipy`, `scikit-learn` 등이 소스 빌드를 시도할 수 있습니다. 이 경우 Visual Studio Build Tools가 필요할 수 있으므로, 설치 문제가 반복되면 Python 3.12 또는 3.13 사용을 권장합니다.
 
 개발 서버 실행:
 
@@ -157,4 +202,3 @@ FastAPI
 - 모든 요청 흐름은 FastAPI를 통해 중앙 집중적으로 처리됩니다.
 - Kubernetes 환경에서는 `ai-services` Namespace 내 Pod로 배포됩니다.
 - 향후 AI 서비스 추가 시 FastAPI에서 Orchestration만 확장하면 되므로 확장성이 높습니다.
-

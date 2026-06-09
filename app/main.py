@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.routers import health
+from app.api.router import api_router
 
 
 def create_app() -> FastAPI:
@@ -9,7 +9,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
     )
 
-    app.include_router(health.router)
+    app.include_router(api_router)
 
     @app.get("/")
     def read_root() -> dict[str, str]:
@@ -19,4 +19,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

@@ -1,0 +1,2 @@
+"""Data transfer object package."""
+
