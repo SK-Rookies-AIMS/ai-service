@@ -1,2 +1,2 @@
-"""FastAPI application package."""
+"""AI service application package."""
 

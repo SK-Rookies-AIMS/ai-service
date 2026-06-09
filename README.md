@@ -17,8 +17,14 @@ FastAPI 기반 AI 서비스 API Gateway / Orchestrator입니다.
 ai-service/
 ├─ app/
 │  ├─ core/
+│  │  ├─ config.py
+│  │  ├─ exceptions.py
+│  │  └─ logging.py
 │  ├─ api/
+│  │  ├─ router.py
 │  │  └─ routers/
+│  │     ├─ health.py
+│  │     └─ root.py
 │  ├─ service/
 │  │  ├─ orchestrator/
 │  │  ├─ llm/
@@ -36,7 +42,11 @@ ai-service/
 │  ├─ dto/
 │  │  ├─ request/
 │  │  └─ response/
+│  │     └─ common_response.py
 │  ├─ utils/
+│  │  ├─ datetime_utils.py
+│  │  ├─ json_utils.py
+│  │  └─ response_utils.py
 │  └─ main.py
 ├─ main.py
 ├─ requirements.txt
@@ -45,9 +55,13 @@ ai-service/
 
 ### 패키지 역할
 
-- `app/core`: 환경 설정, 공통 설정, 애플리케이션 초기화 구성
-- `app/api`: FastAPI API 라우터 집계 및 HTTP API 구성
+- `app/core/config.py`: `.env` 기반 애플리케이션 설정 관리
+- `app/core/logging.py`: 공통 로깅 설정
+- `app/core/exceptions.py`: 공통 예외 클래스 및 FastAPI 예외 핸들러 등록
+- `app/api/router.py`: 전체 API 라우터 집계
 - `app/api/routers`: 기능별 FastAPI 라우터 모듈
+- `app/api/routers/root.py`: 루트 상태 응답 라우터
+- `app/api/routers/health.py`: 헬스 체크 라우터
 - `app/service/orchestrator`: ChatGPT API, AI 매뉴얼 API, colleague-skill 연계 흐름 제어
 - `app/service/llm`: LLM API 연동 및 프롬프트 처리
 - `app/service/analysis`: 요청 분석, 응답 후처리, 분석 로직
@@ -61,8 +75,35 @@ ai-service/
 - `app/ml/artifacts`: 모델 산출물 및 관련 파일 관리
 - `app/kafka`: Kafka 메시지 발행 및 구독 연동
 - `app/dto/request`: 요청 DTO 정의
-- `app/dto/response`: 응답 DTO 정의
-- `app/utils`: 공통 유틸리티 함수
+- `app/dto/response/common_response.py`: 공통 API 응답 DTO 정의
+- `app/utils/datetime_utils.py`: UTC 날짜/시간 공통 함수
+- `app/utils/json_utils.py`: JSON 직렬화 및 역직렬화 공통 함수
+- `app/utils/response_utils.py`: 공통 성공/실패 응답 생성 함수
+
+## 공통 응답 형식
+
+모든 API 응답은 아래 구조를 기본 형식으로 사용합니다.
+
+```json
+{
+  "success": true,
+  "data": {},
+  "message": "로그인 성공",
+  "timestamp": "2026-06-08T16:00:00"
+}
+```
+
+필드 설명:
+
+- `success`: 요청 성공 여부
+- `data`: 응답 데이터
+- `message`: 응답 메시지
+- `timestamp`: 응답 생성 시간
+
+관련 코드:
+
+- `app/dto/response/common_response.py`: `CommonResponse` DTO
+- `app/utils/response_utils.py`: `success_response`, `error_response` 헬퍼
 
 
 ## 가상환경 생성 및 실행

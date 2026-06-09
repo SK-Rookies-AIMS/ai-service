@@ -1,2 +1,2 @@
-"""Data transfer object package."""
+"""DTO package."""
 

@@ -1,2 +1,2 @@
-"""API router modules."""
+"""API router package."""
 
