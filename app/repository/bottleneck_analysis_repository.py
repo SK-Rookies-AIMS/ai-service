@@ -26,25 +26,36 @@ class BottleneckAnalysisRepository:
         self,
         rows: Iterable[dict[str, Any]],
         detected_at: str,
+        *,
+        start_rank: int,
+        end_rank: int,
     ) -> None:
-        """기존 병목 분석 결과를 삭제하고 최신 분석 결과로 교체"""
+        """요청 순위 구간 교체"""
         payload = [{**row, "detected_at": detected_at} for row in rows]
         self._validate_product_process_history_ids(payload)
 
         with self.engine.begin() as conn:
-            # 한 트랜잭션에서 삭제와 삽입을 처리해 중간 상태 노출을 줄임
-            conn.execute(self.table.delete())
+            # 요청한 rank 범위만 갱신
+            conn.execute(
+                self.table.delete().where(
+                    self.table.c.rank_no.between(start_rank, end_rank),
+                ),
+            )
             if payload:
                 conn.execute(self.table.insert(), payload)
 
-    def list_results(self, *, size: int) -> list[dict[str, Any]]:
-        """현재 저장된 병목 분석 결과 페이지를 순위순으로 조회"""
+    def list_results(self, *, cursor: int, size: int) -> list[dict[str, Any]]:
+        """요청 순위 페이지 조회"""
         from sqlalchemy import select
+
+        start_rank = cursor * size + 1
+        end_rank = start_rank + size - 1
 
         query = select(self.table)
         query = (
             # 같은 순위가 있어도 조회 순서가 흔들리지 않도록 보조 정렬
-            query.order_by(self.table.c.rank_no.asc(), self.table.c.id.asc())
+            query.where(self.table.c.rank_no.between(start_rank, end_rank))
+            .order_by(self.table.c.rank_no.asc(), self.table.c.id.asc())
             .limit(size)
         )
 

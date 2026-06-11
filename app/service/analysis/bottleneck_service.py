@@ -44,8 +44,8 @@ class BottleneckAnalysisService:
 
         saved_count, has_next = self.run_analysis_and_save(cursor=page, size=size)
 
-        # 저장소에는 요청한 페이지만 남기므로 최신 저장 결과를 다시 조회
-        rows = self.repository.list_results(size=size)
+        # 저장소에서 요청 페이지 범위만 조회
+        rows = self.repository.list_results(cursor=page, size=size)
         if saved_count == 0 or not rows:
             raise AppException(
                 "병목 분석 결과를 찾을 수 없습니다.",
@@ -127,7 +127,15 @@ class BottleneckAnalysisService:
         page_summaries = summaries[offset : offset + size]
         has_next = len(summaries) > offset + size
 
-        self.repository.replace_results(page_summaries, detected_at=seoul_now_iso())
+        if page_summaries:
+            start_rank = offset + 1
+            end_rank = offset + len(page_summaries)
+            self.repository.replace_results(
+                page_summaries,
+                detected_at=seoul_now_iso(),
+                start_rank=start_rank,
+                end_rank=end_rank,
+            )
         return len(page_summaries), has_next
 
     def _redis(self) -> Any:
