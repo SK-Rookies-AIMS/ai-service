@@ -5,6 +5,8 @@ uvicorn[standard]>=0.32.0
 pydantic>=2.13.0,<3.0.0
 pydantic-settings>=2.12.0,<3.0.0
 python-dotenv>=1.0.1,<2.0.0
+sqlalchemy>=2.0.36,<3.0.0
+pymysql>=1.1.1,<2.0.0
 
 # LLM & External API
 httpx>=0.28.0
@@ -13,6 +15,9 @@ openai>=1.59.0,<2.0.0
 # Kafka
 aiokafka>=0.12.0
 confluent-kafka>=2.6.0
+
+# Redis Cache
+redis>=5.2.0,<6.0.0
 
 # Data Processing
 pandas>=2.2.0
