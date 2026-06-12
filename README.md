@@ -146,7 +146,7 @@ uvicorn app.main:app --reload
 서버 실행 후 아래 주소에서 확인할 수 있습니다.
 
 - API Root: `http://127.0.0.1:8000/`
-- Health Check: `http://127.0.0.1:8000/health`
+- Health Check: `http://127.0.0.1:8000/api/health`
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - OpenAPI Schema: `http://127.0.0.1:8000/openapi.json`
 
