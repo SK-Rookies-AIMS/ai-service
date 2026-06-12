@@ -7,7 +7,7 @@ from app.utils.response_utils import success_response
 router = APIRouter(tags=["health"])
 
 
-@router.get("/health")
+@router.get("/api/health")
 def health_check() -> CommonResponse[dict[str, str | bool]]:
     return success_response(
         data={
