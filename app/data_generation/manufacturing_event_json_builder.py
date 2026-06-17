@@ -49,7 +49,7 @@ PROCESS_META: dict[str, dict[str, Any]] = {
     },
 }
 
-DATASET_ROOT = Path(__file__).resolve().parents[1] / "datasets" / "process"
+DATASET_ROOT = Path(__file__).resolve().parents[1] / "ml" / "datasets" / "process"
 EVENT_DENSITY_WINDOWS: tuple[tuple[int, int, float], ...] = (
     (0, 5, 0.35),
     (5, 8, 0.8),

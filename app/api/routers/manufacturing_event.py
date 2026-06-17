@@ -4,7 +4,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Query, status
 
 from app.dto.response import CommonResponse
-from app.service.manufacturing_event_json_service import (
+from app.service.manufacturing import (
     DEFAULT_CAR_POOL_SIZE,
     DEFAULT_EVENTS_PER_DAY,
     DEFAULT_INSERT_CHUNK_SIZE,
