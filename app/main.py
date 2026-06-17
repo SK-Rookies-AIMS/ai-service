@@ -7,10 +7,12 @@ from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.repository.sampledb_repository import initialize_sampledb
-from app.service.manufacturing import (
-    resume_incomplete_generation_jobs,
+from app.scheduler.manufacturing import (
     start_manufacturing_event_scheduler,
     stop_manufacturing_event_scheduler,
+)
+from app.service.manufacturing import (
+    resume_incomplete_generation_jobs,
 )
 
 
