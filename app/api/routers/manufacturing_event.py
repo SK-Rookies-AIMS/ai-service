@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
 from app.dto.response import CommonResponse
 from app.service.manufacturing_event_json_service import (
@@ -80,25 +80,27 @@ router = APIRouter(prefix="/api/manufacturing/events", tags=["제조 관제 이�
     "/templates/generate",
     summary="제조 이벤트 템플릿 생성",
     operation_id="generateManufacturingEventTemplate",
+    status_code=status.HTTP_202_ACCEPTED,
     description=(
         "CSV 원천 데이터를 전처리/정제해 하루 기준 제조 관제 이벤트 템플릿을 생성하고 "
-        "`manufacturing_event_template` 테이블에 저장하는 API입니다.\n\n"
+        "`manufacturing_event_template` 테이블에 저장하는 비동기 job을 생성하는 API입니다.\n\n"
         "### 동작 방식\n"
+        "- API는 job row를 생성한 뒤 즉시 `jobId`를 반환합니다.\n"
+        "- 실제 템플릿 생성과 DB 저장은 앱 내부 background worker가 수행합니다.\n"
         "- 프레스(PRESS), 차체(BODY), 도장(PAINT), 의장(ASSEMBLY) 공정이 순환 생성됩니다.\n"
         "- 날짜가 고정된 row가 아니라 하루 안에서의 이벤트 발생 위치를 `event_offset_us`로 저장합니다.\n"
         "- `replace=true`이면 같은 `template_name`의 기존 row를 삭제한 뒤 새로 생성합니다.\n"
         "- `insert_chunk_size` 단위로 row를 모아 batch insert합니다.\n\n"
-        "### 주요 응답 데이터\n"
-        "- `templateName`: 저장된 템플릿 이름\n"
-        "- `eventCount`: 요청한 템플릿 이벤트 수\n"
-        "- `generatedCount`: 실제 생성한 이벤트 수\n"
-        "- `affectedRows`: DB insert/update 영향 row 수\n"
-        "- `storedCount`: 해당 템플릿명으로 저장된 전체 row 수\n"
-        "- `insertChunkSize`: batch insert 단위\n"
-        "- `processDistribution`: 공정별 생성 건수\n\n"
+        "### 즉시 응답 데이터\n"
+        "- `jobId`: 비동기 job 고유 ID\n"
+        "- `jobType`: `GENERATE_TEMPLATE`\n"
+        "- `status`: 최초 상태는 `PENDING`, worker 실행 후 `RUNNING`, `SUCCEEDED`, `FAILED`로 변경됩니다.\n"
+        "- `totalExpectedEvents`: 예상 생성 건수\n"
+        "- `generatedCount`, `affectedRows`: worker 진행 중 갱신되는 처리 건수\n"
+        "- `result`: 완료 전에는 `null`, 완료 후 job 상태 조회 API에서 최종 생성 결과가 채워집니다.\n\n"
         f"{TEMPLATE_TABLE_DESCRIPTION}"
     ),
-    responses={200: {"description": "제조 이벤트 템플릿 생성 결과"}},
+    responses={202: {"description": "제조 이벤트 템플릿 생성 job 생성 결과"}},
 )
 def generate_manufacturing_event_template(
     template_name: str = Query(
@@ -131,17 +133,16 @@ def generate_manufacturing_event_template(
         get_manufacturing_event_json_service,
     ),
 ) -> CommonResponse[dict]:
-    result = service.generate_template(
+    result = service.enqueue_generate_template_job(
         template_name=template_name,
         event_count=event_count,
         car_pool_size=car_pool_size,
         insert_chunk_size=insert_chunk_size,
         replace=replace,
-        update_existing=replace,
     )
     return success_response(
         data=result,
-        message="제조 관제 이벤트 템플릿 생성 및 저장이 완료되었습니다.",
+        message="제조 관제 이벤트 템플릿 생성 job이 생성되었습니다.",
     )
 
 
@@ -244,14 +245,18 @@ def replay_manufacturing_event_template(
     "/generate",
     summary="기간별 제조 이벤트 JSON 생성 및 적재",
     operation_id="generateManufacturingEventJson",
+    status_code=status.HTTP_202_ACCEPTED,
     description=(
         "지정한 날짜 범위의 제조 관제 이벤트 JSON을 실제 일자 데이터로 생성해 "
-        "`manufacturing_event_json` 테이블에 저장하는 API입니다.\n\n"
+        "`manufacturing_event_json` 테이블에 저장하는 비동기 job을 생성하는 API입니다.\n\n"
         "### 언제 사용하는 API인가요?\n"
         "- 초기 시연 데이터 또는 특정 기간의 샘플 제조 이벤트를 DB에 실제 row로 적재할 때 사용합니다.\n"
         "- 템플릿 replay가 아니라 CSV 기반 생성기를 직접 실행합니다.\n"
         "- `start_date`부터 `end_date`까지 양 끝 날짜를 모두 포함해 생성합니다.\n\n"
         "### 생성/저장 방식\n"
+        "- API는 job row를 생성한 뒤 즉시 `jobId`를 반환합니다.\n"
+        "- 실제 이벤트 생성과 DB 저장은 앱 내부 background worker가 수행합니다.\n"
+        "- 진행 상태는 job 상태 조회 API로 확인합니다.\n"
         "- 전체 생성 건수는 `(end_date - start_date + 1) * events_per_day`입니다.\n"
         "- 공정은 `PRESS -> BODY -> PAINT -> ASSEMBLY` 순서로 순환 배치됩니다.\n"
         "- 이벤트 시간은 하루 안에서 생산 밀도가 높은 시간대에 더 많이 분포되도록 계산됩니다.\n"
@@ -259,19 +264,16 @@ def replay_manufacturing_event_template(
         "- 생성된 row는 `insert_chunk_size` 단위로 모아 batch insert합니다.\n"
         "- 기본 batch insert 단위는 `1,000`건이며, 요청 파라미터로 `100~10,000` 사이에서 조정할 수 있습니다.\n"
         "- MySQL에서는 `event_id` 중복 시 기존 row의 이벤트 시간, 설비, 상태, JSON payload 등을 갱신합니다.\n\n"
-        "### 주요 응답 데이터\n"
-        "- `startDate`, `endDate`: 생성 기간\n"
-        "- `eventsPerDay`: 하루 생성 이벤트 수\n"
+        "### 즉시 응답 데이터\n"
+        "- `jobId`: 비동기 job 고유 ID\n"
+        "- `jobType`: `GENERATE_RANGE`\n"
+        "- `status`: 최초 상태는 `PENDING`, worker 실행 후 `RUNNING`, `SUCCEEDED`, `FAILED`로 변경됩니다.\n"
         "- `totalExpectedEvents`: 예상 전체 생성 건수\n"
-        "- `generatedCount`: 실제 생성한 이벤트 수\n"
-        "- `affectedRows`: DB insert/update 영향 row 수\n"
-        "- `storedCountInRange`: 해당 기간에 DB에 저장된 row 수\n"
-        "- `carPoolSize`: 사용한 차량 마스터 수\n"
-        "- `insertChunkSize`: batch insert 단위\n"
-        "- `processDistribution`: 공정별 생성 건수\n\n"
+        "- `generatedCount`, `affectedRows`: worker 진행 중 갱신되는 처리 건수\n"
+        "- `result`: 완료 전에는 `null`, 완료 후 job 상태 조회 API에서 최종 생성 결과가 채워집니다.\n\n"
         f"{EVENT_JSON_TABLE_DESCRIPTION}"
     ),
-    responses={200: {"description": "기간별 제조 이벤트 JSON 생성 및 적재 결과"}},
+    responses={202: {"description": "기간별 제조 이벤트 JSON 생성 job 생성 결과"}},
 )
 def generate_manufacturing_event_json(
     start_date: date = Query(
@@ -304,7 +306,7 @@ def generate_manufacturing_event_json(
         get_manufacturing_event_json_service,
     ),
 ) -> CommonResponse[dict]:
-    result = service.generate_range(
+    result = service.enqueue_generate_range_job(
         start_date=start_date,
         end_date=end_date,
         events_per_day=events_per_day,
@@ -313,7 +315,7 @@ def generate_manufacturing_event_json(
     )
     return success_response(
         data=result,
-        message="제조 원천 이벤트 JSON 생성 및 저장이 완료되었습니다.",
+        message="제조 원천 이벤트 JSON 생성 job이 생성되었습니다.",
     )
 
 
@@ -321,14 +323,18 @@ def generate_manufacturing_event_json(
     "/generate/tomorrow",
     summary="템플릿 기반 다음날 제조 이벤트 적재",
     operation_id="generateTomorrowManufacturingEventJson",
+    status_code=status.HTTP_202_ACCEPTED,
     description=(
         "저장된 템플릿을 기준으로 다음날 제조 관제 이벤트를 생성하고 "
-        "`manufacturing_event_json` 테이블에 저장하는 API입니다.\n\n"
+        "`manufacturing_event_json` 테이블에 저장하는 비동기 job을 생성하는 API입니다.\n\n"
         "### 언제 사용하는 API인가요?\n"
         "- 매일 다음날 관제 이벤트 데이터를 미리 생성/적재할 때 사용합니다.\n"
         "- 스케줄러도 이 API와 같은 내부 서비스 로직을 사용합니다.\n"
         "- `base_date`를 입력하지 않으면 서버 실행일 기준 다음날 데이터를 생성합니다.\n\n"
         "### 생성/저장 방식\n"
+        "- API는 job row를 생성한 뒤 즉시 `jobId`를 반환합니다.\n"
+        "- 실제 이벤트 생성과 DB 저장은 앱 내부 background worker가 수행합니다.\n"
+        "- 진행 상태는 job 상태 조회 API로 확인합니다.\n"
         "- target date는 `(base_date 또는 서버 현재 날짜) + 1일`입니다.\n"
         "- 지정한 `template_name`의 템플릿이 없거나 `events_per_day`보다 부족하면 템플릿을 먼저 생성합니다.\n"
         "- 템플릿의 `event_offset_us`를 target date에 더해 실제 `event_time`을 만듭니다.\n"
@@ -336,19 +342,16 @@ def generate_manufacturing_event_json(
         "- 템플릿 row를 `insert_chunk_size` 단위로 읽고, materialize된 이벤트를 같은 단위로 batch insert합니다.\n"
         "- 기본 batch insert 단위는 `1,000`건이며, 요청 파라미터로 `100~10,000` 사이에서 조정할 수 있습니다.\n"
         "- MySQL에서는 `event_id` 중복 시 기존 row의 이벤트 시간, 설비, 상태, JSON payload 등을 갱신합니다.\n\n"
-        "### 주요 응답 데이터\n"
-        "- `templateName`: 사용한 템플릿 이름\n"
-        "- `baseDate`: 다음날 계산 기준 날짜\n"
-        "- `targetDate`: 실제 생성/저장 대상 날짜\n"
-        "- `templateEventCount`: 사용 가능한 템플릿 이벤트 수\n"
-        "- `generatedCount`: 실제 생성한 이벤트 수\n"
-        "- `affectedRows`: DB insert/update 영향 row 수\n"
-        "- `storedCountInDate`: target date에 저장된 row 수\n"
-        "- `insertChunkSize`: batch insert 단위\n"
-        "- `templatePrepared`: 템플릿 준비 결과\n\n"
+        "### 즉시 응답 데이터\n"
+        "- `jobId`: 비동기 job 고유 ID\n"
+        "- `jobType`: `GENERATE_TOMORROW`\n"
+        "- `status`: 최초 상태는 `PENDING`, worker 실행 후 `RUNNING`, `SUCCEEDED`, `FAILED`로 변경됩니다.\n"
+        "- `totalExpectedEvents`: 예상 전체 생성 건수\n"
+        "- `generatedCount`, `affectedRows`: worker 진행 중 갱신되는 처리 건수\n"
+        "- `result`: 완료 전에는 `null`, 완료 후 job 상태 조회 API에서 최종 생성 결과가 채워집니다.\n\n"
         f"{EVENT_JSON_TABLE_DESCRIPTION}"
     ),
-    responses={200: {"description": "템플릿 기반 다음날 제조 이벤트 적재 결과"}},
+    responses={202: {"description": "템플릿 기반 다음날 제조 이벤트 적재 job 생성 결과"}},
 )
 def generate_tomorrow_manufacturing_event_json(
     base_date: date | None = Query(
@@ -381,7 +384,7 @@ def generate_tomorrow_manufacturing_event_json(
         get_manufacturing_event_json_service,
     ),
 ) -> CommonResponse[dict]:
-    result = service.generate_tomorrow(
+    result = service.enqueue_generate_tomorrow_job(
         base_date=base_date,
         template_name=template_name,
         events_per_day=events_per_day,
@@ -390,7 +393,43 @@ def generate_tomorrow_manufacturing_event_json(
     )
     return success_response(
         data=result,
-        message="템플릿 기반 다음날 제조 원천 이벤트 JSON 적재가 완료되었습니다.",
+        message="템플릿 기반 다음날 제조 원천 이벤트 JSON 적재 job이 생성되었습니다.",
+    )
+
+
+@router.get(
+    "/generate/jobs/{job_id}",
+    summary="제조 이벤트 생성 job 상태 조회",
+    operation_id="getManufacturingEventGenerationJob",
+    description=(
+        "`/generate`, `/generate/tomorrow`, `/templates/generate`에서 생성한 "
+        "비동기 제조 이벤트 생성 job의 진행 상태를 조회합니다.\n\n"
+        "### 상태 값\n"
+        "- `PENDING`: job이 생성되었고 worker 실행을 기다리는 상태\n"
+        "- `RUNNING`: worker가 생성/저장을 수행 중인 상태\n"
+        "- `SUCCEEDED`: 생성/저장이 완료된 상태\n"
+        "- `FAILED`: 생성/저장 중 오류가 발생한 상태\n\n"
+        "### 주요 응답 데이터\n"
+        "- `jobId`: job 고유 ID\n"
+        "- `jobType`: `GENERATE_RANGE`, `GENERATE_TOMORROW`, `GENERATE_TEMPLATE`\n"
+        "- `totalExpectedEvents`: 예상 전체 처리 건수\n"
+        "- `generatedCount`: 현재까지 생성한 이벤트 수\n"
+        "- `affectedRows`: 현재까지 DB insert/update 영향 row 수\n"
+        "- `result`: 성공 시 기존 동기 API가 반환하던 생성 결과\n"
+        "- `errorMessage`: 실패 시 오류 메시지"
+    ),
+    responses={200: {"description": "제조 이벤트 생성 job 상태"}},
+)
+def get_manufacturing_event_generation_job(
+    job_id: str,
+    service: ManufacturingEventJsonService = Depends(
+        get_manufacturing_event_json_service,
+    ),
+) -> CommonResponse[dict]:
+    result = service.get_generation_job(job_id)
+    return success_response(
+        data=result,
+        message="제조 이벤트 생성 job 상태 조회가 완료되었습니다.",
     )
 
 

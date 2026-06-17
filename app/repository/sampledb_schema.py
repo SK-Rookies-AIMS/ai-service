@@ -132,6 +132,27 @@ manufacturing_event_template = Table(
     Index("idx_template_equipment_offset", "template_name", "equipment_code", "event_offset_us"),
 )
 
+manufacturing_event_generation_job = Table(
+    "manufacturing_event_generation_job",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("job_id", String(100), nullable=False, unique=True),
+    Column("job_type", String(50), nullable=False),
+    Column("status", String(30), nullable=False),
+    Column("request_json", JSON, nullable=False),
+    Column("result_json", JSON),
+    Column("error_message", String(1000)),
+    Column("total_expected_events", BigInteger, nullable=False, server_default="0"),
+    Column("generated_count", BigInteger, nullable=False, server_default="0"),
+    Column("affected_rows", BigInteger, nullable=False, server_default="0"),
+    Column("created_at", DateTime, nullable=False, server_default=func.current_timestamp()),
+    Column("started_at", DateTime),
+    Column("finished_at", DateTime),
+    Column("updated_at", DateTime, nullable=False, server_default=func.current_timestamp()),
+    Index("idx_generation_job_status_created", "status", "created_at"),
+    Index("idx_generation_job_type_created", "job_type", "created_at"),
+)
+
 thermal_vision = Table(
     "thermal_vision",
     metadata,

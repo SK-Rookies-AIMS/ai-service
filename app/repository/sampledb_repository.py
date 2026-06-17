@@ -8,6 +8,7 @@ from sqlalchemy.dialects.mysql import insert
 from app.repository.sampledb_schema import (
     car_master,
     equipment,
+    manufacturing_event_generation_job,
     manufacturing_event_json,
     manufacturing_event_template,
     metadata,
@@ -40,6 +41,7 @@ class SampleDbRepository:
     """sampledb 스키마와 제조 원천 이벤트 JSON 저장소."""
 
     def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
         self.engine = create_engine(
             database_url,
             connect_args=mysql_connect_args_for_seoul(database_url),
@@ -215,6 +217,125 @@ class SampleDbRepository:
         with self.engine.begin() as conn:
             result = conn.execute(statement)
             return int(result.rowcount or 0)
+
+    def create_generation_job(
+        self,
+        *,
+        job_id: str,
+        job_type: str,
+        request_json: dict[str, Any],
+        total_expected_events: int = 0,
+    ) -> dict[str, Any]:
+        now = datetime.now()
+        row = {
+            "job_id": job_id,
+            "job_type": job_type,
+            "status": "PENDING",
+            "request_json": request_json,
+            "total_expected_events": total_expected_events,
+            "generated_count": 0,
+            "affected_rows": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self.engine.begin() as conn:
+            if self.engine.dialect.name != "mysql":
+                next_id = int(
+                    conn.execute(
+                        select(func.max(manufacturing_event_generation_job.c.id)),
+                    ).scalar()
+                    or 0,
+                )
+                row = {**row, "id": next_id + 1}
+            conn.execute(manufacturing_event_generation_job.insert(), row)
+        return self.get_generation_job(job_id) or {}
+
+    def get_generation_job(self, job_id: str) -> dict[str, Any] | None:
+        query = select(manufacturing_event_generation_job).where(
+            manufacturing_event_generation_job.c.job_id == job_id,
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(query).mappings().first()
+            return _format_generation_job_row(dict(row)) if row else None
+
+    def list_resumable_generation_jobs(self) -> list[dict[str, Any]]:
+        query = (
+            select(manufacturing_event_generation_job)
+            .where(manufacturing_event_generation_job.c.status.in_(["PENDING", "RUNNING"]))
+            .order_by(
+                manufacturing_event_generation_job.c.created_at.asc(),
+                manufacturing_event_generation_job.c.id.asc(),
+            )
+        )
+        with self.engine.connect() as conn:
+            return [
+                _format_generation_job_row(dict(row))
+                for row in conn.execute(query).mappings()
+            ]
+
+    def mark_generation_job_running(self, job_id: str) -> None:
+        now = datetime.now()
+        self._update_generation_job(
+            job_id,
+            status="RUNNING",
+            started_at=now,
+            updated_at=now,
+        )
+
+    def update_generation_job_progress(
+        self,
+        job_id: str,
+        progress: dict[str, Any],
+    ) -> None:
+        self._update_generation_job(
+            job_id,
+            generated_count=int(progress.get("generatedCount", 0)),
+            affected_rows=int(progress.get("affectedRows", 0)),
+            total_expected_events=int(progress.get("totalExpectedEvents", 0)),
+            updated_at=datetime.now(),
+        )
+
+    def mark_generation_job_succeeded(
+        self,
+        job_id: str,
+        result_json: dict[str, Any],
+    ) -> None:
+        now = datetime.now()
+        self._update_generation_job(
+            job_id,
+            status="SUCCEEDED",
+            result_json=result_json,
+            error_message=None,
+            generated_count=int(result_json.get("generatedCount", 0)),
+            affected_rows=int(result_json.get("affectedRows", 0)),
+            total_expected_events=int(
+                result_json.get(
+                    "totalExpectedEvents",
+                    result_json.get("templateEventCount", result_json.get("eventCount", 0)),
+                ),
+            ),
+            finished_at=now,
+            updated_at=now,
+        )
+
+    def mark_generation_job_failed(self, job_id: str, error_message: str) -> None:
+        now = datetime.now()
+        self._update_generation_job(
+            job_id,
+            status="FAILED",
+            error_message=error_message[:1000],
+            finished_at=now,
+            updated_at=now,
+        )
+
+    def _update_generation_job(self, job_id: str, **values: Any) -> None:
+        statement = (
+            manufacturing_event_generation_job.update()
+            .where(manufacturing_event_generation_job.c.job_id == job_id)
+            .values(**values)
+        )
+        with self.engine.begin() as conn:
+            conn.execute(statement)
 
     def insert_event_json_rows(
         self,
@@ -426,3 +547,21 @@ class SampleDbRepository:
 def initialize_sampledb(database_url: str) -> None:
     """sampledb 테이블과 참조 설비 데이터를 초기화한다."""
     SampleDbRepository(database_url).initialize()
+
+
+def _format_generation_job_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "jobId": row["job_id"],
+        "jobType": row["job_type"],
+        "status": row["status"],
+        "request": row["request_json"],
+        "result": row["result_json"],
+        "errorMessage": row["error_message"],
+        "totalExpectedEvents": int(row["total_expected_events"] or 0),
+        "generatedCount": int(row["generated_count"] or 0),
+        "affectedRows": int(row["affected_rows"] or 0),
+        "createdAt": row["created_at"],
+        "startedAt": row["started_at"],
+        "finishedAt": row["finished_at"],
+        "updatedAt": row["updated_at"],
+    }

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
+from uuid import uuid4
 
 from fastapi import status
 
@@ -22,6 +25,14 @@ DEFAULT_INSERT_CHUNK_SIZE = 1_000
 DEFAULT_TEMPLATE_NAME = "default"
 TEMPLATE_ANCHOR_DATE = date(2000, 1, 1)
 ProgressCallback = Callable[[dict[str, Any]], None]
+JOB_TYPE_GENERATE_RANGE = "GENERATE_RANGE"
+JOB_TYPE_GENERATE_TOMORROW = "GENERATE_TOMORROW"
+JOB_TYPE_GENERATE_TEMPLATE = "GENERATE_TEMPLATE"
+_generation_job_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="manufacturing-event-generation-job",
+)
+logger = logging.getLogger(__name__)
 
 
 class ManufacturingEventJsonService:
@@ -130,6 +141,50 @@ class ManufacturingEventJsonService:
             "insertChunkSize": insert_chunk_size,
             "processDistribution": distribution,
         }
+
+    def enqueue_generate_range_job(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        events_per_day: int = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
+    ) -> dict[str, Any]:
+        if start_date > end_date:
+            raise AppException(
+                "start_date는 end_date보다 이후일 수 없습니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        if events_per_day < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
+            raise AppException(
+                "events_per_day는 최소 4 이상이어야 공정별 이벤트를 생성할 수 있습니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        if car_pool_size < 1:
+            raise AppException(
+                "car_pool_size는 1 이상이어야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        if insert_chunk_size < 1:
+            raise AppException(
+                "insert_chunk_size는 1 이상이어야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request_json = {
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "eventsPerDay": events_per_day,
+            "carPoolSize": car_pool_size,
+            "insertChunkSize": insert_chunk_size,
+        }
+        total_expected_events = ((end_date - start_date).days + 1) * events_per_day
+        return self._create_and_submit_generation_job(
+            job_type=JOB_TYPE_GENERATE_RANGE,
+            request_json=request_json,
+            total_expected_events=total_expected_events,
+        )
 
     def generate_template(
         self,
@@ -254,6 +309,44 @@ class ManufacturingEventJsonService:
                 {"range": "22:00-24:00", "density": "LOW"},
             ],
         }
+
+    def enqueue_generate_template_job(
+        self,
+        *,
+        template_name: str = DEFAULT_TEMPLATE_NAME,
+        event_count: int = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        if event_count < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
+            raise AppException(
+                "event_count는 최소 4 이상이어야 공정별 템플릿을 생성할 수 있습니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        if car_pool_size < 1:
+            raise AppException(
+                "car_pool_size는 1 이상이어야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        if insert_chunk_size < 1:
+            raise AppException(
+                "insert_chunk_size는 1 이상이어야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request_json = {
+            "templateName": template_name,
+            "eventCount": event_count,
+            "carPoolSize": car_pool_size,
+            "insertChunkSize": insert_chunk_size,
+            "replace": replace,
+        }
+        return self._create_and_submit_generation_job(
+            job_type=JOB_TYPE_GENERATE_TEMPLATE,
+            request_json=request_json,
+            total_expected_events=event_count,
+        )
 
     def list_template_events(
         self,
@@ -450,6 +543,76 @@ class ManufacturingEventJsonService:
             "templatePrepared": template_result,
         }
 
+    def enqueue_generate_tomorrow_job(
+        self,
+        *,
+        base_date: date | None = None,
+        template_name: str = DEFAULT_TEMPLATE_NAME,
+        events_per_day: int = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
+    ) -> dict[str, Any]:
+        if events_per_day < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
+            raise AppException(
+                "events_per_day는 최소 4 이상이어야 공정별 이벤트를 생성할 수 있습니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        if car_pool_size < 1:
+            raise AppException(
+                "car_pool_size는 1 이상이어야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        if insert_chunk_size < 1:
+            raise AppException(
+                "insert_chunk_size는 1 이상이어야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request_json = {
+            "baseDate": base_date.isoformat() if base_date else None,
+            "templateName": template_name,
+            "eventsPerDay": events_per_day,
+            "carPoolSize": car_pool_size,
+            "insertChunkSize": insert_chunk_size,
+        }
+        return self._create_and_submit_generation_job(
+            job_type=JOB_TYPE_GENERATE_TOMORROW,
+            request_json=request_json,
+            total_expected_events=events_per_day,
+        )
+
+    def get_generation_job(self, job_id: str) -> dict[str, Any]:
+        self.repository.ensure_schema()
+        job = self.repository.get_generation_job(job_id)
+        if not job:
+            raise AppException(
+                "제조 이벤트 생성 job을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return job
+
+    def _create_and_submit_generation_job(
+        self,
+        *,
+        job_type: str,
+        request_json: dict[str, Any],
+        total_expected_events: int,
+    ) -> dict[str, Any]:
+        self.repository.ensure_schema()
+        job_id = str(uuid4())
+        job = self.repository.create_generation_job(
+            job_id=job_id,
+            job_type=job_type,
+            request_json=request_json,
+            total_expected_events=total_expected_events,
+        )
+        _generation_job_executor.submit(
+            _run_generation_job,
+            self.repository.database_url,
+            job_id,
+        )
+        return job
+
     def list_events(
         self,
         *,
@@ -478,6 +641,105 @@ def get_manufacturing_event_json_service() -> ManufacturingEventJsonService:
     return ManufacturingEventJsonService(
         SampleDbRepository(settings.sample_database_connection_url),
     )
+
+
+def _run_generation_job(database_url: str, job_id: str) -> None:
+    repository = SampleDbRepository(database_url)
+    service = ManufacturingEventJsonService(repository)
+    job = repository.get_generation_job(job_id)
+    if not job:
+        logger.warning("제조 이벤트 생성 job을 찾을 수 없습니다: job_id=%s", job_id)
+        return
+
+    try:
+        repository.mark_generation_job_running(job_id)
+        result = _execute_generation_job(service, repository, job)
+        repository.mark_generation_job_succeeded(job_id, result)
+        logger.info(
+            "제조 이벤트 생성 job 완료: job_id=%s job_type=%s generated=%s affected=%s",
+            job_id,
+            job["jobType"],
+            result.get("generatedCount"),
+            result.get("affectedRows"),
+        )
+    except Exception as exc:
+        message = getattr(exc, "message", str(exc))
+        repository.mark_generation_job_failed(job_id, message)
+        logger.exception(
+            "제조 이벤트 생성 job 실패: job_id=%s job_type=%s",
+            job_id,
+            job.get("jobType"),
+        )
+
+
+def _execute_generation_job(
+    service: ManufacturingEventJsonService,
+    repository: SampleDbRepository,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    request = job["request"]
+    progress_callback = lambda progress: repository.update_generation_job_progress(
+        job["jobId"],
+        progress,
+    )
+
+    if job["jobType"] == JOB_TYPE_GENERATE_RANGE:
+        return service.generate_range(
+            start_date=date.fromisoformat(request["startDate"]),
+            end_date=date.fromisoformat(request["endDate"]),
+            events_per_day=int(request["eventsPerDay"]),
+            car_pool_size=int(request["carPoolSize"]),
+            insert_chunk_size=int(request["insertChunkSize"]),
+            update_existing=True,
+            progress_callback=progress_callback,
+        )
+
+    if job["jobType"] == JOB_TYPE_GENERATE_TEMPLATE:
+        return service.generate_template(
+            template_name=str(request["templateName"]),
+            event_count=int(request["eventCount"]),
+            car_pool_size=int(request["carPoolSize"]),
+            insert_chunk_size=int(request["insertChunkSize"]),
+            replace=bool(request["replace"]),
+            update_existing=bool(request["replace"]),
+            progress_callback=progress_callback,
+        )
+
+    if job["jobType"] == JOB_TYPE_GENERATE_TOMORROW:
+        base_date = (
+            date.fromisoformat(request["baseDate"])
+            if request.get("baseDate")
+            else None
+        )
+        return service.generate_tomorrow(
+            base_date=base_date,
+            template_name=str(request["templateName"]),
+            events_per_day=int(request["eventsPerDay"]),
+            car_pool_size=int(request["carPoolSize"]),
+            insert_chunk_size=int(request["insertChunkSize"]),
+            update_existing=True,
+            progress_callback=progress_callback,
+        )
+
+    raise AppException(
+        "지원하지 않는 제조 이벤트 생성 job 유형입니다.",
+        status_code=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def resume_incomplete_generation_jobs(database_url: str) -> int:
+    repository = SampleDbRepository(database_url)
+    repository.ensure_schema()
+    jobs = repository.list_resumable_generation_jobs()
+    for job in jobs:
+        _generation_job_executor.submit(
+            _run_generation_job,
+            database_url,
+            job["jobId"],
+        )
+    if jobs:
+        logger.info("미완료 제조 이벤트 생성 job %s건을 worker에 재등록했습니다.", len(jobs))
+    return len(jobs)
 
 
 def _normalize_template_name(template_name: str) -> str:

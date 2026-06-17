@@ -11,6 +11,7 @@ from app.service.manufacturing_event_scheduler import (
     start_manufacturing_event_scheduler,
     stop_manufacturing_event_scheduler,
 )
+from app.service.manufacturing_event_json_service import resume_incomplete_generation_jobs
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,11 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def start_background_schedulers() -> None:
+        if settings.sample_database_connection_url:
+            try:
+                resume_incomplete_generation_jobs(settings.sample_database_connection_url)
+            except Exception:
+                logger.exception("미완료 제조 이벤트 생성 job 복구에 실패했습니다.")
         start_manufacturing_event_scheduler(app)
 
     @app.on_event("shutdown")
