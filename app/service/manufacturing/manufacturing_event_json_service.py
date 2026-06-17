@@ -12,7 +12,7 @@ from fastapi import status
 
 from app.core.config import settings
 from app.core.exceptions import AppException
-from app.ml.preprocessing.manufacturing_event_json_builder import (
+from app.data_generation.manufacturing_event_json_builder import (
     EventBuildRequest,
     ManufacturingEventJsonBuilder,
 )

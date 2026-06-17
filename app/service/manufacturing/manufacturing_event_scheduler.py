@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from app.core.config import settings
 from app.repository.sampledb_repository import SampleDbRepository
-from app.service.manufacturing_event_json_service import (
+from .manufacturing_event_json_service import (
     DEFAULT_TEMPLATE_NAME,
     ManufacturingEventJsonService,
 )
