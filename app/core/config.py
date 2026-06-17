@@ -30,6 +30,26 @@ class Settings(BaseSettings):
 
     main_database_url: str | None = Field(default=None, alias="MAIN_DATABASE_URL")
     sample_database_url: str | None = Field(default=None, alias="SAMPLE_DATABASE_URL")
+    manufacturing_event_scheduler_enabled: bool = Field(
+        default=True,
+        alias="MANUFACTURING_EVENT_SCHEDULER_ENABLED",
+    )
+    manufacturing_event_scheduler_events_per_day: int = Field(
+        default=86_400,
+        alias="MANUFACTURING_EVENT_SCHEDULER_EVENTS_PER_DAY",
+    )
+    manufacturing_event_template_event_count: int = Field(
+        default=86_400,
+        alias="MANUFACTURING_EVENT_TEMPLATE_EVENT_COUNT",
+    )
+    manufacturing_event_car_pool_size: int = Field(
+        default=10_000,
+        alias="MANUFACTURING_EVENT_CAR_POOL_SIZE",
+    )
+    manufacturing_event_insert_chunk_size: int = Field(
+        default=1_000,
+        alias="MANUFACTURING_EVENT_INSERT_CHUNK_SIZE",
+    )
 
     @property
     def bottleneck_database_url(self) -> str:

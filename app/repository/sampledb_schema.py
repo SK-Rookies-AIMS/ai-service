@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     MetaData,
     String,
     Table,
@@ -20,7 +21,6 @@ metadata = MetaData()
 
 process_code_enum = Enum("PRESS", "BODY", "PAINT", "ASSEMBLY")
 equipment_type_enum = Enum("HYDRAULIC_PRESS", "ROBOT_ARM", "CAMERA", "CONVEYOR")
-equipment_status_enum = Enum("NORMAL", "WARNING", "FAULT", "MAINTENANCE")
 source_type_enum = Enum("BOSCH", "FORD", "PRESS_CURRENT", "ROBOT_CURRENT", "THERMAL_VISION")
 data_type_enum = Enum("PROCESS", "SENSOR", "QUALITY", "THERMAL")
 quality_result_enum = Enum("NORMAL", "DEFECT")
@@ -36,6 +36,7 @@ car_master = Table(
     Column("car_color", String(30), nullable=False),
     Column("fuel_efficiency", Integer, nullable=False),
     Column("created_at", DateTime, nullable=False),
+    UniqueConstraint("vehicle_id", name="uq_car_master_vehicle_id"),
 )
 
 equipment = Table(
@@ -46,7 +47,6 @@ equipment = Table(
     Column("equipment_code", String(50), nullable=False, unique=True),
     Column("equipment_name", String(100), nullable=False),
     Column("equipment_type", equipment_type_enum, nullable=False),
-    Column("status", equipment_status_enum, nullable=False, server_default="NORMAL"),
     Column("created_at", DateTime, nullable=False, server_default=func.current_timestamp()),
     Index("idx_equipment_process_code", "process_code"),
 )
@@ -80,6 +80,56 @@ manufacturing_event = Table(
     Index("idx_manufacturing_event_car_master_id", "car_master_id"),
     Index("idx_manufacturing_event_equipment_code", "equipment_code"),
     Index("idx_manufacturing_event_event_time", "event_time"),
+)
+
+manufacturing_event_json = Table(
+    "manufacturing_event_json",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("event_id", String(100), nullable=False, unique=True),
+    Column("event_time", DateTime, nullable=False),
+    Column("car_master_id", BigInteger, ForeignKey("car_master.id"), nullable=False),
+    Column("equipment_id", BigInteger, ForeignKey("equipment.id"), nullable=False),
+    Column("process_code", process_code_enum, nullable=False),
+    Column("station_code", String(50)),
+    Column("equipment_code", String(50), nullable=False),
+    Column("equipment_type", String(50)),
+    Column("equipment_status", String(30)),
+    Column("event_type", String(50)),
+    Column("event_json", JSON, nullable=False),
+    Column("is_sent", Boolean, nullable=False, server_default="0"),
+    Column("sent_at", DateTime),
+    Column("created_at", DateTime, nullable=False, server_default=func.current_timestamp()),
+    Column("updated_at", DateTime, nullable=False, server_default=func.current_timestamp()),
+    Index("idx_event_time_sent", "event_time", "is_sent"),
+    Index("idx_process_time", "process_code", "event_time"),
+    Index("idx_equipment_time", "equipment_code", "event_time"),
+    Index("idx_car_time", "car_master_id", "event_time"),
+    Index("idx_event_id", "event_id"),
+    Index("idx_equipment_id_time", "equipment_id", "event_time"),
+)
+
+manufacturing_event_template = Table(
+    "manufacturing_event_template",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("template_name", String(50), nullable=False),
+    Column("template_event_id", String(100), nullable=False, unique=True),
+    Column("event_offset_us", BigInteger, nullable=False),
+    Column("car_master_id", BigInteger, ForeignKey("car_master.id"), nullable=False),
+    Column("equipment_id", BigInteger, ForeignKey("equipment.id"), nullable=False),
+    Column("process_code", process_code_enum, nullable=False),
+    Column("station_code", String(50)),
+    Column("equipment_code", String(50), nullable=False),
+    Column("equipment_type", String(50)),
+    Column("equipment_status", String(30)),
+    Column("event_type", String(50)),
+    Column("event_json", JSON, nullable=False),
+    Column("created_at", DateTime, nullable=False, server_default=func.current_timestamp()),
+    UniqueConstraint("template_name", "event_offset_us", name="uq_template_offset"),
+    Index("idx_template_name_offset", "template_name", "event_offset_us"),
+    Index("idx_template_process_offset", "template_name", "process_code", "event_offset_us"),
+    Index("idx_template_equipment_offset", "template_name", "equipment_code", "event_offset_us"),
 )
 
 thermal_vision = Table(
