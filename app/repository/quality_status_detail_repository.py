@@ -2,18 +2,23 @@ from sqlalchemy import create_engine, text
 from decimal import Decimal
 import pandas as pd
 
-
-
-DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-"
-    "@127.0.0.1:13306/sampledb"
+SAMPLE_DATABASE_URL = (
+    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/sampledb"
 )
 
-engine = create_engine(
-    DATABASE_URL,
+MAIN_DATABASE_URL = (
+    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
+)
+
+sample_engine = create_engine(
+    SAMPLE_DATABASE_URL,
     pool_pre_ping=True
 )
 
+main_engine = create_engine(
+    MAIN_DATABASE_URL,
+    pool_pre_ping=True
+)
 
 def calculate_status_score(status, control):
 
@@ -58,7 +63,7 @@ def get_result(score):
     return "FAIL"
 
 
-with engine.connect() as conn:
+with sample_engine.connect() as conn:
 
     master_rows = conn.execute(
         text("""
@@ -130,14 +135,13 @@ df = pd.DataFrame(
     inspection_status_detail_list
 )
 
-csv_file = "inspection_status_detail.csv"
-
-df.to_csv(
-    csv_file,
-    index=False,
-    encoding="utf-8-sig"
+df.to_sql(
+    name="inspection_status_detail",
+    con=main_engine,
+    if_exists="append",
+    index=False
 )
 
-print()
-print(f"CSV 저장 완료: {csv_file}")
-print(f"총 {len(df)}건")
+print(
+    f"inspection_status_detail table 전송 완료"
+)
