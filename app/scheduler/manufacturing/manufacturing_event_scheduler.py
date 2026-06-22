@@ -108,7 +108,7 @@ def _materialize_tomorrow_events() -> dict[str, object] | None:
 
 def _seconds_until_next_run() -> float:
     now = datetime.now(SEOUL_TZ)
-    next_run = datetime.combine(now.date(), time(hour=0, minute=10), tzinfo=SEOUL_TZ)
+    next_run = datetime.combine(now.date(), time(hour=17), tzinfo=SEOUL_TZ)
     if next_run <= now:
         next_run += timedelta(days=1)
     return max(60.0, (next_run - now).total_seconds())
