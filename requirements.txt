@@ -13,11 +13,10 @@ httpx>=0.28.0
 openai>=1.59.0,<2.0.0
 
 # Kafka
-kafka-python>=2.3.0,<3.0.0
-aws-msk-iam-sasl-signer-python>=1.0.2,<2.0.0
-boto3>=1.26.125,<2.0.0
-botocore>=1.29.125,<2.0.0
-click>=7.0,<9.0
+aiokafka>=0.12.0
+confluent-kafka>=2.6.0
+aws-msk-iam-sasl-signer-python>=1.0.2
+kafka-python>=3.0.2
 
 # Redis Cache
 redis>=5.2.0,<6.0.0
@@ -33,8 +32,6 @@ scikit-learn>=1.5.0
 lightgbm>=4.5.0
 xgboost>=2.1.0
 shap>=0.46.0
-optuna>=4.0.0,<5.0.0
-imbalanced-learn>=0.12.0,<1.0.0
 
 # Common
 orjson>=3.10.0
