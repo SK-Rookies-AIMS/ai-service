@@ -2,14 +2,23 @@ from sqlalchemy import create_engine, text
 import pandas as pd
 from datetime import datetime, timedelta
 
-DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-"
-    "@127.0.0.1:13306/sampledb"
+SAMPLE_DATABASE_URL = (
+    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/sampledb"
 )
 
-# =========================
-# Risk 계산 함수
-# =========================
+MAIN_DATABASE_URL = (
+    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
+)
+
+sample_engine = create_engine(
+    SAMPLE_DATABASE_URL,
+    pool_pre_ping=True
+)
+
+main_engine = create_engine(
+    MAIN_DATABASE_URL,
+    pool_pre_ping=True
+)
 
 def calculate_status_risk(row):
     score = 100
@@ -93,11 +102,6 @@ def get_risk_level(score):
 # DB
 # =========================
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True
-)
-
 result = []
 risk_id = 1
 
@@ -106,7 +110,7 @@ base_date = datetime.strptime(
     "%Y-%m-%d"
 )
 
-with engine.connect() as conn:
+with sample_engine.connect() as conn:
 
     for day in range(7):
 
@@ -240,18 +244,15 @@ with engine.connect() as conn:
             })
 
             risk_id += 1
-
-# =========================
-# CSV 저장
-# =========================
-
+            
 df = pd.DataFrame(result)
-
-df.to_csv(
-    "inspection_risk_trend.csv",
-    index=False,
-    encoding="utf-8-sig"
+df.to_sql(
+    name="inspection_risk_trend",
+    con=main_engine,
+    if_exists="append",
+    index=False
 )
 
-print(df)
-print(f"총 생성 건수 : {len(df)}")
+print(
+    f"inspection_risk_trend table 전송 완료"
+)

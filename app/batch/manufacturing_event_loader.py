@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    """CLI 옵션에 따라 실제 이벤트 또는 재사용 템플릿을 배치 생성한다."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -35,6 +36,7 @@ def main() -> None:
     started_at = time.monotonic()
     last_progress_at = {"value": 0.0}
 
+    # 템플릿 모드는 날짜별 이벤트 테이블이 아니라 재생 가능한 기준 패턴을 만든다.
     if args.template:
         _run_template_batch(
             args=args,
@@ -120,7 +122,10 @@ def _parse_args() -> argparse.Namespace:
         "--events-per-day",
         type=int,
         default=DEFAULT_EVENTS_PER_DAY,
-        help="하루 생성 이벤트 수입니다. 기본값은 템플릿 기준 86400입니다.",
+        help=(
+            "선택적 날짜별 이벤트 수 제한입니다. 생략하면 vehicle_id 생산일자에 "
+            "해당하는 car_master 전체 수 * 4로 계산합니다."
+        ),
     )
     parser.add_argument(
         "--template-name",
@@ -131,7 +136,7 @@ def _parse_args() -> argparse.Namespace:
         "--car-pool-size",
         type=int,
         default=DEFAULT_CAR_POOL_SIZE,
-        help="재사용할 차량 마스터 풀 크기입니다.",
+        help="선택적 차량 수 제한입니다. 생략하면 생산일자의 차량 전체를 사용합니다.",
     )
     parser.add_argument(
         "--chunk-size",
@@ -162,6 +167,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_date_range(args: argparse.Namespace) -> tuple[date, date]:
+    """축약 옵션을 실제 생성 시작일/종료일로 변환한다."""
     if args.initial:
         return date(2026, 6, 1), date(2026, 6, 16)
     if args.tomorrow:
@@ -190,6 +196,7 @@ def _run_template_batch(
     )
     result = service.generate_template(
         template_name=args.template_name,
+        production_date=args.start_date or date(2026, 6, 1),
         event_count=args.events_per_day,
         car_pool_size=args.car_pool_size,
         insert_chunk_size=args.chunk_size,

@@ -45,7 +45,6 @@ async def stop_manufacturing_event_scheduler(app: FastAPI) -> None:
 
 
 async def _run_daily_generation_loop() -> None:
-    await asyncio.to_thread(_ensure_default_template)
     while True:
         await asyncio.sleep(_seconds_until_next_run())
         try:
@@ -54,30 +53,6 @@ async def _run_daily_generation_loop() -> None:
             logger.exception(
                 "제조 이벤트 다음날 데이터 적재 스케줄러 실행에 실패했습니다.",
             )
-
-
-def _ensure_default_template() -> dict[str, object] | None:
-    if not settings.sample_database_connection_url:
-        return None
-
-    service = ManufacturingEventJsonService(
-        SampleDbRepository(settings.sample_database_connection_url),
-    )
-    result = service.ensure_template(
-        template_name=DEFAULT_TEMPLATE_NAME,
-        event_count=settings.manufacturing_event_template_event_count,
-        car_pool_size=settings.manufacturing_event_car_pool_size,
-        insert_chunk_size=settings.manufacturing_event_insert_chunk_size,
-    )
-    logger.info(
-        "제조 이벤트 기본 템플릿 준비 완료: %s",
-        {
-            "templateName": result["templateName"],
-            "storedCount": result["storedCount"],
-            "created": result["created"],
-        },
-    )
-    return result
 
 
 def _materialize_tomorrow_events() -> dict[str, object] | None:
@@ -89,7 +64,7 @@ def _materialize_tomorrow_events() -> dict[str, object] | None:
     )
     result = service.generate_tomorrow(
         template_name=DEFAULT_TEMPLATE_NAME,
-        events_per_day=settings.manufacturing_event_template_event_count,
+        events_per_day=settings.manufacturing_event_scheduler_events_per_day,
         car_pool_size=settings.manufacturing_event_car_pool_size,
         insert_chunk_size=settings.manufacturing_event_insert_chunk_size,
         update_existing=True,
@@ -108,7 +83,7 @@ def _materialize_tomorrow_events() -> dict[str, object] | None:
 
 def _seconds_until_next_run() -> float:
     now = datetime.now(SEOUL_TZ)
-    next_run = datetime.combine(now.date(), time(hour=0, minute=10), tzinfo=SEOUL_TZ)
+    next_run = datetime.combine(now.date(), time(hour=17), tzinfo=SEOUL_TZ)
     if next_run <= now:
         next_run += timedelta(days=1)
     return max(60.0, (next_run - now).total_seconds())

@@ -13,14 +13,20 @@ from fastapi import status
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.data_generation.manufacturing_event_json_builder import (
+    ABNORMAL_RATIO,
     EventBuildRequest,
     ManufacturingEventJsonBuilder,
+    initial_dispatch_status,
+    is_abnormal_operation_status,
+    normalize_event_json,
+    validate_process_data,
 )
 from app.repository.sampledb_repository import SampleDbRepository
 
 
-DEFAULT_EVENTS_PER_DAY = 86_400
-DEFAULT_CAR_POOL_SIZE = 10_000
+# 실제 생성 수량은 vehicle_id의 생산일자에 해당하는 car_master 수로 결정한다.
+DEFAULT_EVENTS_PER_DAY: int | None = None
+DEFAULT_CAR_POOL_SIZE: int | None = None
 DEFAULT_INSERT_CHUNK_SIZE = 1_000
 DEFAULT_TEMPLATE_NAME = "default"
 TEMPLATE_ANCHOR_DATE = date(2000, 1, 1)
@@ -29,6 +35,7 @@ JOB_TYPE_GENERATE_RANGE = "GENERATE_RANGE"
 JOB_TYPE_GENERATE_TOMORROW = "GENERATE_TOMORROW"
 JOB_TYPE_GENERATE_TEMPLATE = "GENERATE_TEMPLATE"
 _generation_job_executor = ThreadPoolExecutor(
+    # 대량 생성 job끼리 DB insert 부하가 겹치지 않도록 단일 worker로 직렬 처리한다.
     max_workers=1,
     thread_name_prefix="manufacturing-event-generation-job",
 )
@@ -51,71 +58,83 @@ class ManufacturingEventJsonService:
         *,
         start_date: date,
         end_date: date,
-        events_per_day: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        events_per_day: int | None = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int | None = DEFAULT_CAR_POOL_SIZE,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
         update_existing: bool = True,
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        """생산일자별 car_master 차량 전체에 4공정 이벤트를 생성한다."""
         if start_date > end_date:
             raise AppException(
                 "start_date는 end_date보다 이후일 수 없습니다.",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        if events_per_day < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
-            raise AppException(
-                "events_per_day는 최소 4 이상이어야 공정별 이벤트를 생성할 수 있습니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        if car_pool_size < 1:
-            raise AppException(
-                "car_pool_size는 1 이상이어야 합니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
+        vehicle_limit = _resolve_vehicle_limit(events_per_day, car_pool_size)
         if insert_chunk_size < 1:
             raise AppException(
                 "insert_chunk_size는 1 이상이어야 합니다.",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        self.repository.ensure_schema()
-        self.repository.seed_equipment()
-        days = (end_date - start_date).days + 1
-        total_events = days * events_per_day
-        car_id_map = self.repository.ensure_car_master_rows(car_pool_size)
-        equipment_map = self.repository.get_equipment_map()
-
-        request = EventBuildRequest(
-            start_date=start_date,
-            end_date=end_date,
-            events_per_day=events_per_day,
-            car_id_map=car_id_map,
-            equipment_map=equipment_map,
+        # 생성 전에 PRD 스키마와 공정별 기본 설비 5개를 보장한다.
+        self.repository.schema.ensure_schema()
+        self.repository.equipment.seed_defaults()
+        equipment_map = self.repository.equipment.get_map()
+        production_dates = list(_date_range(start_date, end_date))
+        daily_car_maps = {
+            production_date: self.repository.cars.get_map_by_production_date(
+                production_date,
+                limit=vehicle_limit,
+            )
+            for production_date in production_dates
+        }
+        total_vehicle_count = sum(len(car_map) for car_map in daily_car_maps.values())
+        abnormal_vehicle_count = sum(
+            round(len(car_map) * ABNORMAL_RATIO)
+            for car_map in daily_car_maps.values()
         )
+        normal_vehicle_count = total_vehicle_count - abnormal_vehicle_count
+        total_events = total_vehicle_count * 4
         affected_rows = 0
         generated_count = 0
         distribution = {"PRESS": 0, "BODY": 0, "PAINT": 0, "ASSEMBLY": 0}
+        abnormal_distribution = {"PRESS": 0, "BODY": 0, "PAINT": 0, "ASSEMBLY": 0}
+        # 날짜별 차량 수가 달라도 공통 chunk 단위로 이어서 저장한다.
         chunk: list[dict[str, Any]] = []
-        for row in self.builder.iter_rows(request):
-            chunk.append(row)
-            generated_count += 1
-            distribution[str(row["process_code"])] += 1
-            if len(chunk) >= insert_chunk_size:
-                affected_rows += self.repository.insert_event_json_rows(
-                    chunk,
-                    update_existing=update_existing,
-                )
-                chunk = []
-                if progress_callback:
-                    progress_callback(
-                        {
-                            "generatedCount": generated_count,
-                            "affectedRows": affected_rows,
-                            "totalExpectedEvents": total_events,
-                        },
+        for production_date, car_id_map in daily_car_maps.items():
+            daily_event_count = len(car_id_map) * 4
+            request = EventBuildRequest(
+                start_date=production_date,
+                end_date=production_date,
+                events_per_day=daily_event_count,
+                car_id_map=car_id_map,
+                equipment_map=equipment_map,
+            )
+            for row in self.builder.iter_rows(request):
+                chunk.append(row)
+                generated_count += 1
+                distribution[str(row["process_code"])] += 1
+                if is_abnormal_operation_status(
+                    row["event_json"]["equipmentStatus"]["operationStatus"],
+                ):
+                    abnormal_distribution[str(row["process_code"])] += 1
+                if len(chunk) >= insert_chunk_size:
+                    affected_rows += self.repository.events.insert_rows(
+                        chunk,
+                        update_existing=update_existing,
                     )
+                    chunk = []
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "generatedCount": generated_count,
+                                "affectedRows": affected_rows,
+                                "totalExpectedEvents": total_events,
+                            },
+                        )
         if chunk:
-            affected_rows += self.repository.insert_event_json_rows(
+            affected_rows += self.repository.events.insert_rows(
                 chunk,
                 update_existing=update_existing,
             )
@@ -128,18 +147,27 @@ class ManufacturingEventJsonService:
                     },
                 )
 
-        stored_count = self.repository.count_event_json_between(start_date, end_date)
         return {
             "startDate": start_date.isoformat(),
             "endDate": end_date.isoformat(),
-            "eventsPerDay": events_per_day,
+            "requestedEventCountPerDay": events_per_day,
             "totalExpectedEvents": total_events,
             "generatedCount": generated_count,
             "affectedRows": affected_rows,
-            "storedCountInRange": stored_count,
-            "carPoolSize": len(car_id_map),
+            # event_time을 NULL로 저장하므로 현재 작업에서 생성한 건수를 반환한다.
+            "storedCountInRange": generated_count,
+            "carPoolSize": total_vehicle_count,
+            "normalVehicleCount": normal_vehicle_count,
+            "discardVehicleCount": abnormal_vehicle_count,
+            "dailyVehicleCounts": {
+                production_date.isoformat(): len(car_id_map)
+                for production_date, car_id_map in daily_car_maps.items()
+            },
             "insertChunkSize": insert_chunk_size,
             "processDistribution": distribution,
+            "abnormalDistribution": abnormal_distribution,
+            "normalEventCount": generated_count - sum(abnormal_distribution.values()),
+            "abnormalEventCount": sum(abnormal_distribution.values()),
         }
 
     def enqueue_generate_range_job(
@@ -147,25 +175,17 @@ class ManufacturingEventJsonService:
         *,
         start_date: date,
         end_date: date,
-        events_per_day: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        events_per_day: int | None = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int | None = DEFAULT_CAR_POOL_SIZE,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
     ) -> dict[str, Any]:
+        """기간 생성 요청을 DB job으로 등록하고 background worker에 전달한다."""
         if start_date > end_date:
             raise AppException(
                 "start_date는 end_date보다 이후일 수 없습니다.",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        if events_per_day < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
-            raise AppException(
-                "events_per_day는 최소 4 이상이어야 공정별 이벤트를 생성할 수 있습니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        if car_pool_size < 1:
-            raise AppException(
-                "car_pool_size는 1 이상이어야 합니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
+        vehicle_limit = _resolve_vehicle_limit(events_per_day, car_pool_size)
         if insert_chunk_size < 1:
             raise AppException(
                 "insert_chunk_size는 1 이상이어야 합니다.",
@@ -175,11 +195,23 @@ class ManufacturingEventJsonService:
         request_json = {
             "startDate": start_date.isoformat(),
             "endDate": end_date.isoformat(),
-            "eventsPerDay": events_per_day,
+            "eventCount": events_per_day,
             "carPoolSize": car_pool_size,
             "insertChunkSize": insert_chunk_size,
         }
-        total_expected_events = ((end_date - start_date).days + 1) * events_per_day
+        total_expected_events = sum(
+            _selected_vehicle_count(
+                self.repository.cars.count_by_production_date(production_date),
+                vehicle_limit,
+                production_date,
+            )
+            for production_date in _date_range(start_date, end_date)
+        ) * 4
+        if total_expected_events < 1:
+            raise AppException(
+                "요청 날짜에 해당하는 car_master 차량이 없습니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         return self._create_and_submit_generation_job(
             job_type=JOB_TYPE_GENERATE_RANGE,
             request_json=request_json,
@@ -190,23 +222,16 @@ class ManufacturingEventJsonService:
         self,
         *,
         template_name: str = DEFAULT_TEMPLATE_NAME,
-        event_count: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        production_date: date = date(2026, 6, 1),
+        event_count: int | None = None,
+        car_pool_size: int | None = None,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
         replace: bool = False,
         update_existing: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
-        if event_count < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
-            raise AppException(
-                "event_count는 최소 4 이상이어야 공정별 템플릿을 생성할 수 있습니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        if car_pool_size < 1:
-            raise AppException(
-                "car_pool_size는 1 이상이어야 합니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
+        """날짜를 제외한 하루 기준 제조 이벤트 패턴을 템플릿으로 저장한다."""
+        vehicle_limit = _resolve_vehicle_limit(event_count, car_pool_size)
         if insert_chunk_size < 1:
             raise AppException(
                 "insert_chunk_size는 1 이상이어야 합니다.",
@@ -214,17 +239,22 @@ class ManufacturingEventJsonService:
             )
 
         normalized_template_name = _normalize_template_name(template_name)
-        self.repository.ensure_schema()
-        self.repository.seed_equipment()
+        self.repository.schema.ensure_schema()
+        self.repository.equipment.seed_defaults()
         if replace:
-            self.repository.delete_template_events(normalized_template_name)
+            self.repository.templates.delete(normalized_template_name)
 
-        car_id_map = self.repository.ensure_car_master_rows(car_pool_size)
-        equipment_map = self.repository.get_equipment_map()
+        # 템플릿도 production_date와 vehicle_id가 일치하는 실제 차량 PK만 참조한다.
+        car_id_map = self.repository.cars.get_map_by_production_date(
+            production_date,
+            limit=vehicle_limit,
+        )
+        resolved_event_count = len(car_id_map) * 4
+        equipment_map = self.repository.equipment.get_map()
         request = EventBuildRequest(
             start_date=TEMPLATE_ANCHOR_DATE,
             end_date=TEMPLATE_ANCHOR_DATE,
-            events_per_day=event_count,
+            events_per_day=resolved_event_count,
             car_id_map=car_id_map,
             equipment_map=equipment_map,
         )
@@ -232,11 +262,18 @@ class ManufacturingEventJsonService:
         affected_rows = 0
         generated_count = 0
         distribution = {"PRESS": 0, "BODY": 0, "PAINT": 0, "ASSEMBLY": 0}
+        abnormal_distribution = {"PRESS": 0, "BODY": 0, "PAINT": 0, "ASSEMBLY": 0}
         chunk: list[dict[str, Any]] = []
+        # 실제 날짜 대신 고정 기준일과 하루 시작 기준 offset을 저장한다.
+        # 이후 어느 날짜에도 동일한 생산 패턴을 재사용할 수 있다.
         anchor_datetime = datetime.combine(TEMPLATE_ANCHOR_DATE, time.min)
         for row in self.builder.iter_rows(request):
             generated_count += 1
             distribution[str(row["process_code"])] += 1
+            if is_abnormal_operation_status(
+                row["event_json"]["equipmentStatus"]["operationStatus"],
+            ):
+                abnormal_distribution[str(row["process_code"])] += 1
             template_event_id = (
                 f"TMPL-{normalized_template_name.upper()}-{generated_count:06d}"
             )
@@ -262,7 +299,7 @@ class ManufacturingEventJsonService:
                 },
             )
             if len(chunk) >= insert_chunk_size:
-                affected_rows += self.repository.insert_template_event_rows(
+                affected_rows += self.repository.templates.insert_rows(
                     chunk,
                     update_existing=update_existing,
                 )
@@ -272,11 +309,11 @@ class ManufacturingEventJsonService:
                         {
                             "generatedCount": generated_count,
                             "affectedRows": affected_rows,
-                            "totalExpectedEvents": event_count,
+                            "totalExpectedEvents": resolved_event_count,
                         },
                     )
         if chunk:
-            affected_rows += self.repository.insert_template_event_rows(
+            affected_rows += self.repository.templates.insert_rows(
                 chunk,
                 update_existing=update_existing,
             )
@@ -285,20 +322,24 @@ class ManufacturingEventJsonService:
                     {
                         "generatedCount": generated_count,
                         "affectedRows": affected_rows,
-                        "totalExpectedEvents": event_count,
+                        "totalExpectedEvents": resolved_event_count,
                     },
                 )
 
-        stored_count = self.repository.count_template_events(normalized_template_name)
+        stored_count = self.repository.templates.count(normalized_template_name)
         return {
             "templateName": normalized_template_name,
-            "eventCount": event_count,
+            "productionDate": production_date.isoformat(),
+            "eventCount": resolved_event_count,
             "generatedCount": generated_count,
             "affectedRows": affected_rows,
             "storedCount": stored_count,
             "carPoolSize": len(car_id_map),
             "insertChunkSize": insert_chunk_size,
             "processDistribution": distribution,
+            "abnormalDistribution": abnormal_distribution,
+            "normalEventCount": generated_count - sum(abnormal_distribution.values()),
+            "abnormalEventCount": sum(abnormal_distribution.values()),
             "timeDistribution": [
                 {"range": "00:00-05:00", "density": "LOW"},
                 {"range": "05:00-08:00", "density": "MEDIUM"},
@@ -314,29 +355,30 @@ class ManufacturingEventJsonService:
         self,
         *,
         template_name: str = DEFAULT_TEMPLATE_NAME,
-        event_count: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        production_date: date = date(2026, 6, 1),
+        event_count: int | None = None,
+        car_pool_size: int | None = None,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
         replace: bool = False,
     ) -> dict[str, Any]:
-        if event_count < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
-            raise AppException(
-                "event_count는 최소 4 이상이어야 공정별 템플릿을 생성할 수 있습니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        if car_pool_size < 1:
-            raise AppException(
-                "car_pool_size는 1 이상이어야 합니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
+        vehicle_limit = _resolve_vehicle_limit(event_count, car_pool_size)
         if insert_chunk_size < 1:
             raise AppException(
                 "insert_chunk_size는 1 이상이어야 합니다.",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
+        available_vehicle_count = self.repository.cars.count_by_production_date(
+            production_date,
+        )
+        selected_vehicle_count = _selected_vehicle_count(
+            available_vehicle_count,
+            vehicle_limit,
+            production_date,
+        )
         request_json = {
             "templateName": template_name,
+            "productionDate": production_date.isoformat(),
             "eventCount": event_count,
             "carPoolSize": car_pool_size,
             "insertChunkSize": insert_chunk_size,
@@ -345,7 +387,7 @@ class ManufacturingEventJsonService:
         return self._create_and_submit_generation_job(
             job_type=JOB_TYPE_GENERATE_TEMPLATE,
             request_json=request_json,
-            total_expected_events=event_count,
+            total_expected_events=selected_vehicle_count * 4,
         )
 
     def list_template_events(
@@ -356,7 +398,7 @@ class ManufacturingEventJsonService:
         offset: int = 0,
         process_code: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self.repository.list_template_event_rows(
+        return self.repository.templates.list_rows(
             template_name=_normalize_template_name(template_name),
             limit=limit,
             offset=offset,
@@ -392,6 +434,7 @@ class ManufacturingEventJsonService:
         update_existing: bool = True,
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        """저장된 템플릿에 목표 날짜와 결정적 변동을 입혀 실제 이벤트로 적재한다."""
         if insert_chunk_size < 1:
             raise AppException(
                 "insert_chunk_size는 1 이상이어야 합니다.",
@@ -399,8 +442,8 @@ class ManufacturingEventJsonService:
             )
 
         normalized_template_name = _normalize_template_name(template_name)
-        self.repository.ensure_schema()
-        total_template_events = self.repository.count_template_events(
+        self.repository.schema.ensure_schema()
+        total_template_events = self.repository.templates.count(
             normalized_template_name,
         )
         if total_template_events < 1:
@@ -412,9 +455,11 @@ class ManufacturingEventJsonService:
         affected_rows = 0
         generated_count = 0
         distribution = {"PRESS": 0, "BODY": 0, "PAINT": 0, "ASSEMBLY": 0}
+        abnormal_distribution = {"PRESS": 0, "BODY": 0, "PAINT": 0, "ASSEMBLY": 0}
+        # 템플릿 역시 페이지 단위로 읽어 대량 materialize 시 메모리 사용량을 제한한다.
         offset = 0
         while offset < total_template_events:
-            template_rows = self.repository.list_template_event_rows(
+            template_rows = self.repository.templates.list_rows(
                 template_name=normalized_template_name,
                 limit=insert_chunk_size,
                 offset=offset,
@@ -426,12 +471,16 @@ class ManufacturingEventJsonService:
                 _materialize_template_row(row, target_date=target_date)
                 for row in template_rows
             ]
-            affected_rows += self.repository.insert_event_json_rows(
+            affected_rows += self.repository.events.insert_rows(
                 materialized_rows,
                 update_existing=update_existing,
             )
             for row in materialized_rows:
                 distribution[str(row["process_code"])] += 1
+                if is_abnormal_operation_status(
+                    row["event_json"]["equipmentStatus"]["operationStatus"],
+                ):
+                    abnormal_distribution[str(row["process_code"])] += 1
 
             generated_count += len(materialized_rows)
             offset += len(template_rows)
@@ -444,20 +493,20 @@ class ManufacturingEventJsonService:
                     },
                 )
 
-        stored_count = self.repository.count_event_json_between(
-            target_date,
-            target_date,
-        )
         return {
             "templateName": normalized_template_name,
             "targetDate": target_date.isoformat(),
             "templateEventCount": total_template_events,
             "generatedCount": generated_count,
             "affectedRows": affected_rows,
-            "storedCountInDate": stored_count,
+            # event_time을 NULL로 저장하므로 현재 materialize한 건수를 반환한다.
+            "storedCountInDate": generated_count,
             "insertChunkSize": insert_chunk_size,
             "updateExisting": update_existing,
             "processDistribution": distribution,
+            "abnormalDistribution": abnormal_distribution,
+            "normalEventCount": generated_count - sum(abnormal_distribution.values()),
+            "abnormalEventCount": sum(abnormal_distribution.values()),
             "variationMode": "target_date_and_template_event_id_seed",
         }
 
@@ -465,28 +514,42 @@ class ManufacturingEventJsonService:
         self,
         *,
         template_name: str = DEFAULT_TEMPLATE_NAME,
-        event_count: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        production_date: date = date(2026, 6, 1),
+        event_count: int | None = None,
+        car_pool_size: int | None = None,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
     ) -> dict[str, Any]:
+        """요청 수량과 정확히 일치하는 템플릿이 없으면 전체를 다시 생성한다."""
         normalized_template_name = _normalize_template_name(template_name)
-        self.repository.ensure_schema()
-        stored_count = self.repository.count_template_events(normalized_template_name)
-        if stored_count >= event_count:
+        self.repository.schema.ensure_schema()
+        vehicle_limit = _resolve_vehicle_limit(event_count, car_pool_size)
+        available_vehicle_count = self.repository.cars.count_by_production_date(
+            production_date,
+        )
+        selected_vehicle_count = _selected_vehicle_count(
+            available_vehicle_count,
+            vehicle_limit,
+            production_date,
+        )
+        resolved_event_count = selected_vehicle_count * 4
+        stored_count = self.repository.templates.count(normalized_template_name)
+        # 차량당 4공정 보장이 중요하므로 "이상"이 아니라 정확히 같은 건수만 재사용한다.
+        if stored_count == resolved_event_count:
             return {
                 "templateName": normalized_template_name,
-                "eventCount": event_count,
+                "eventCount": resolved_event_count,
                 "storedCount": stored_count,
                 "created": False,
             }
 
         result = self.generate_template(
             template_name=normalized_template_name,
+            production_date=production_date,
             event_count=event_count,
             car_pool_size=car_pool_size,
             insert_chunk_size=insert_chunk_size,
-            replace=False,
-            update_existing=False,
+            replace=stored_count > 0,
+            update_existing=stored_count > 0,
         )
         return {
             **result,
@@ -496,8 +559,8 @@ class ManufacturingEventJsonService:
     def generate_initial_demo_range(
         self,
         *,
-        events_per_day: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        events_per_day: int | None = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int | None = DEFAULT_CAR_POOL_SIZE,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
         update_existing: bool = True,
         progress_callback: ProgressCallback | None = None,
@@ -517,30 +580,29 @@ class ManufacturingEventJsonService:
         *,
         base_date: date | None = None,
         template_name: str = DEFAULT_TEMPLATE_NAME,
-        events_per_day: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        events_per_day: int | None = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int | None = DEFAULT_CAR_POOL_SIZE,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
         update_existing: bool = True,
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        """기준일 다음날 vehicle_id 생산일자의 차량 전체로 이벤트를 생성한다."""
         target_date = (base_date or date.today()) + timedelta(days=1)
-        template_result = self.ensure_template(
-            template_name=template_name,
-            event_count=events_per_day,
+        result = self.generate_range(
+            start_date=target_date,
+            end_date=target_date,
+            events_per_day=events_per_day,
             car_pool_size=car_pool_size,
-            insert_chunk_size=insert_chunk_size,
-        )
-        materialized_result = self.materialize_template_events(
-            template_name=template_name,
-            target_date=target_date,
             insert_chunk_size=insert_chunk_size,
             update_existing=update_existing,
             progress_callback=progress_callback,
         )
         return {
-            **materialized_result,
+            **result,
             "baseDate": (base_date or date.today()).isoformat(),
-            "templatePrepared": template_result,
+            "targetDate": target_date.isoformat(),
+            "templateName": template_name,
+            "generationMode": "CAR_MASTER_PRODUCTION_DATE",
         }
 
     def enqueue_generate_tomorrow_job(
@@ -548,20 +610,11 @@ class ManufacturingEventJsonService:
         *,
         base_date: date | None = None,
         template_name: str = DEFAULT_TEMPLATE_NAME,
-        events_per_day: int = DEFAULT_EVENTS_PER_DAY,
-        car_pool_size: int = DEFAULT_CAR_POOL_SIZE,
+        events_per_day: int | None = DEFAULT_EVENTS_PER_DAY,
+        car_pool_size: int | None = DEFAULT_CAR_POOL_SIZE,
         insert_chunk_size: int = DEFAULT_INSERT_CHUNK_SIZE,
     ) -> dict[str, Any]:
-        if events_per_day < len(("PRESS", "BODY", "PAINT", "ASSEMBLY")):
-            raise AppException(
-                "events_per_day는 최소 4 이상이어야 공정별 이벤트를 생성할 수 있습니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        if car_pool_size < 1:
-            raise AppException(
-                "car_pool_size는 1 이상이어야 합니다.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
+        vehicle_limit = _resolve_vehicle_limit(events_per_day, car_pool_size)
         if insert_chunk_size < 1:
             raise AppException(
                 "insert_chunk_size는 1 이상이어야 합니다.",
@@ -571,19 +624,28 @@ class ManufacturingEventJsonService:
         request_json = {
             "baseDate": base_date.isoformat() if base_date else None,
             "templateName": template_name,
-            "eventsPerDay": events_per_day,
+            "eventCount": events_per_day,
             "carPoolSize": car_pool_size,
             "insertChunkSize": insert_chunk_size,
         }
+        target_date = (base_date or date.today()) + timedelta(days=1)
+        available_vehicle_count = self.repository.cars.count_by_production_date(
+            target_date,
+        )
+        selected_vehicle_count = _selected_vehicle_count(
+            available_vehicle_count,
+            vehicle_limit,
+            target_date,
+        )
         return self._create_and_submit_generation_job(
             job_type=JOB_TYPE_GENERATE_TOMORROW,
             request_json=request_json,
-            total_expected_events=events_per_day,
+            total_expected_events=selected_vehicle_count * 4,
         )
 
     def get_generation_job(self, job_id: str) -> dict[str, Any]:
-        self.repository.ensure_schema()
-        job = self.repository.get_generation_job(job_id)
+        self.repository.schema.ensure_schema()
+        job = self.repository.jobs.get(job_id)
         if not job:
             raise AppException(
                 "제조 이벤트 생성 job을 찾을 수 없습니다.",
@@ -598,9 +660,10 @@ class ManufacturingEventJsonService:
         request_json: dict[str, Any],
         total_expected_events: int,
     ) -> dict[str, Any]:
-        self.repository.ensure_schema()
+        """job 상태 row를 먼저 남긴 뒤 단일 background worker에 실행을 위임한다."""
+        self.repository.schema.ensure_schema()
         job_id = str(uuid4())
-        job = self.repository.create_generation_job(
+        job = self.repository.jobs.create(
             job_id=job_id,
             job_type=job_type,
             request_json=request_json,
@@ -623,7 +686,7 @@ class ManufacturingEventJsonService:
         process_code: str | None = None,
         is_sent: bool | None = None,
     ) -> list[dict[str, Any]]:
-        return self.repository.list_event_json_rows(
+        return self.repository.events.list_rows(
             limit=limit,
             offset=offset,
             start_date=start_date,
@@ -644,32 +707,48 @@ def get_manufacturing_event_json_service() -> ManufacturingEventJsonService:
 
 
 def _run_generation_job(database_url: str, job_id: str) -> None:
+    """비동기 생성 job의 RUNNING/SUCCEEDED/FAILED 상태 전이를 관리한다."""
     repository = SampleDbRepository(database_url)
     service = ManufacturingEventJsonService(repository)
-    job = repository.get_generation_job(job_id)
-    if not job:
-        logger.warning("제조 이벤트 생성 job을 찾을 수 없습니다: job_id=%s", job_id)
-        return
+    # uvicorn --reload의 이전/신규 프로세스나 다중 worker가 같은 미완료 job을
+    # 동시에 복구하지 못하도록 DB advisory lock으로 생성 작업 전체를 직렬화한다.
+    with repository.jobs.execution_lock() as acquired:
+        if not acquired:
+            logger.error("제조 이벤트 생성 전역 잠금을 획득하지 못했습니다: job_id=%s", job_id)
+            return
 
-    try:
-        repository.mark_generation_job_running(job_id)
-        result = _execute_generation_job(service, repository, job)
-        repository.mark_generation_job_succeeded(job_id, result)
-        logger.info(
-            "제조 이벤트 생성 job 완료: job_id=%s job_type=%s generated=%s affected=%s",
-            job_id,
-            job["jobType"],
-            result.get("generatedCount"),
-            result.get("affectedRows"),
-        )
-    except Exception as exc:
-        message = getattr(exc, "message", str(exc))
-        repository.mark_generation_job_failed(job_id, message)
-        logger.exception(
-            "제조 이벤트 생성 job 실패: job_id=%s job_type=%s",
-            job_id,
-            job.get("jobType"),
-        )
+        # 잠금을 기다리는 동안 다른 프로세스가 완료했을 수 있으므로 상태를 다시 읽는다.
+        job = repository.jobs.get(job_id)
+        if not job:
+            logger.warning("제조 이벤트 생성 job을 찾을 수 없습니다: job_id=%s", job_id)
+            return
+        if job["status"] in {"SUCCEEDED", "FAILED"}:
+            logger.info(
+                "이미 종료된 제조 이벤트 생성 job을 건너뜁니다: job_id=%s status=%s",
+                job_id,
+                job["status"],
+            )
+            return
+
+        try:
+            repository.jobs.mark_running(job_id)
+            result = _execute_generation_job(service, repository, job)
+            repository.jobs.mark_succeeded(job_id, result)
+            logger.info(
+                "제조 이벤트 생성 job 완료: job_id=%s job_type=%s generated=%s affected=%s",
+                job_id,
+                job["jobType"],
+                result.get("generatedCount"),
+                result.get("affectedRows"),
+            )
+        except Exception as exc:
+            message = getattr(exc, "message", str(exc))
+            repository.jobs.mark_failed(job_id, message)
+            logger.exception(
+                "제조 이벤트 생성 job 실패: job_id=%s job_type=%s",
+                job_id,
+                job.get("jobType"),
+            )
 
 
 def _execute_generation_job(
@@ -677,8 +756,9 @@ def _execute_generation_job(
     repository: SampleDbRepository,
     job: dict[str, Any],
 ) -> dict[str, Any]:
+    """저장된 job 요청을 종류별 동기 서비스 메서드 호출로 변환한다."""
     request = job["request"]
-    progress_callback = lambda progress: repository.update_generation_job_progress(
+    progress_callback = lambda progress: repository.jobs.update_progress(
         job["jobId"],
         progress,
     )
@@ -687,8 +767,10 @@ def _execute_generation_job(
         return service.generate_range(
             start_date=date.fromisoformat(request["startDate"]),
             end_date=date.fromisoformat(request["endDate"]),
-            events_per_day=int(request["eventsPerDay"]),
-            car_pool_size=int(request["carPoolSize"]),
+            events_per_day=_optional_int(
+                request.get("eventCount", request.get("eventsPerDay")),
+            ),
+            car_pool_size=_optional_int(request.get("carPoolSize")),
             insert_chunk_size=int(request["insertChunkSize"]),
             update_existing=True,
             progress_callback=progress_callback,
@@ -697,8 +779,9 @@ def _execute_generation_job(
     if job["jobType"] == JOB_TYPE_GENERATE_TEMPLATE:
         return service.generate_template(
             template_name=str(request["templateName"]),
-            event_count=int(request["eventCount"]),
-            car_pool_size=int(request["carPoolSize"]),
+            production_date=date.fromisoformat(request["productionDate"]),
+            event_count=_optional_int(request.get("eventCount")),
+            car_pool_size=_optional_int(request.get("carPoolSize")),
             insert_chunk_size=int(request["insertChunkSize"]),
             replace=bool(request["replace"]),
             update_existing=bool(request["replace"]),
@@ -714,8 +797,10 @@ def _execute_generation_job(
         return service.generate_tomorrow(
             base_date=base_date,
             template_name=str(request["templateName"]),
-            events_per_day=int(request["eventsPerDay"]),
-            car_pool_size=int(request["carPoolSize"]),
+            events_per_day=_optional_int(
+                request.get("eventCount", request.get("eventsPerDay")),
+            ),
+            car_pool_size=_optional_int(request.get("carPoolSize")),
             insert_chunk_size=int(request["insertChunkSize"]),
             update_existing=True,
             progress_callback=progress_callback,
@@ -729,8 +814,8 @@ def _execute_generation_job(
 
 def resume_incomplete_generation_jobs(database_url: str) -> int:
     repository = SampleDbRepository(database_url)
-    repository.ensure_schema()
-    jobs = repository.list_resumable_generation_jobs()
+    repository.schema.ensure_schema()
+    jobs = repository.jobs.list_resumable()
     for job in jobs:
         _generation_job_executor.submit(
             _run_generation_job,
@@ -750,11 +835,74 @@ def _normalize_template_name(template_name: str) -> str:
     return normalized or DEFAULT_TEMPLATE_NAME
 
 
+def _resolve_vehicle_limit(
+    event_count: int | None,
+    car_pool_size: int | None,
+) -> int | None:
+    """선택적 수량 제한을 차량 수로 정규화한다."""
+    if event_count is not None:
+        if event_count < 4 or event_count % 4 != 0:
+            raise AppException(
+                "event_count는 차량당 4공정 기준으로 4의 배수여야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        event_vehicle_count = event_count // 4
+        if car_pool_size is not None and car_pool_size != event_vehicle_count:
+            raise AppException(
+                "event_count와 car_pool_size가 일치하지 않습니다: "
+                f"event_count/4={event_vehicle_count}, "
+                f"car_pool_size={car_pool_size}",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        return event_vehicle_count
+
+    if car_pool_size is not None:
+        if car_pool_size < 1:
+            raise AppException(
+                "car_pool_size는 1 이상이어야 합니다.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        return car_pool_size
+    return None
+
+
+def _selected_vehicle_count(
+    available_count: int,
+    vehicle_limit: int | None,
+    production_date: date,
+) -> int:
+    if available_count < 1:
+        raise AppException(
+            f"{production_date.isoformat()} 생산 차량이 car_master에 없습니다.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    if vehicle_limit is not None and available_count < vehicle_limit:
+        raise AppException(
+            "요청한 차량 수보다 해당 날짜의 car_master가 부족합니다: "
+            f"date={production_date.isoformat()}, required={vehicle_limit}, "
+            f"actual={available_count}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return vehicle_limit if vehicle_limit is not None else available_count
+
+
+def _date_range(start_date: date, end_date: date):
+    current = start_date
+    while current <= end_date:
+        yield current
+        current += timedelta(days=1)
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if value is not None else None
+
+
 def _materialize_template_row(
     row: dict[str, Any],
     *,
     target_date: date,
 ) -> dict[str, Any]:
+    """템플릿 한 행을 목표 날짜의 manufacturing_event_json 행으로 변환한다."""
     event_time = datetime.combine(target_date, time.min) + timedelta(
         microseconds=int(row["event_offset_us"]),
     )
@@ -762,32 +910,38 @@ def _materialize_template_row(
     event_id = f"EVT-{target_date:%Y%m%d}-{sequence_no:06d}"
     event_json = copy.deepcopy(row["event_json"])
     event_json["event"]["eventId"] = event_id
-    event_json["event"]["eventTime"] = event_time.isoformat()
-    event_json["equipmentStatus"]["statusChangedTime"] = event_time.isoformat()
-    event_json["equipmentStatus"]["lastNormalTime"] = (
-        event_time - timedelta(seconds=31)
-    ).isoformat()
+    event_json["event"]["eventTime"] = None
+    event_json["equipmentStatus"]["lastNormalTime"] = None
+    event_json["equipmentStatus"]["statusChangedTime"] = None
+    # 날짜와 template_event_id가 같으면 항상 같은 값이 나오도록 결정적으로 변동한다.
     _apply_date_variation(
         event_json,
         target_date=target_date,
         template_event_id=str(row["template_event_id"]),
     )
-    materialized_status = event_json["equipmentStatus"]["operationStatus"]
+    event_json = normalize_event_json(event_json)
+    # 날짜별 변동 후에도 해당 공정의 processData 블록 하나와 필수 필드를 보장한다.
+    validate_process_data(
+        str(row["process_code"]),
+        event_json.get("processData", {}),
+    )
     return {
         "event_id": event_id,
         "event_time": event_time,
-        "template_event_id": row["template_event_id"],
-        "template_name": row["template_name"],
-        "event_offset_us": row["event_offset_us"],
         "car_master_id": row["car_master_id"],
         "equipment_id": row["equipment_id"],
         "process_code": row["process_code"],
         "station_code": row["station_code"],
         "equipment_code": row["equipment_code"],
         "equipment_type": row["equipment_type"],
-        "equipment_status": materialized_status,
+        "equipment_status": event_json["equipmentStatus"]["operationStatus"],
         "event_type": row["event_type"],
         "event_json": event_json,
+        # 재생된 이벤트도 최초 공정 제어 규칙을 그대로 따른다.
+        "dispatch_status": initial_dispatch_status(str(row["process_code"])),
+        "analysis_status": "NOT_ANALYZED",
+        "retry_count": 0,
+        "error_message": None,
     }
 
 
@@ -797,11 +951,13 @@ def _apply_date_variation(
     target_date: date,
     template_event_id: str,
 ) -> None:
+    """정상/이상 클래스는 보존하면서 날짜별 센서·공정 수치에 작은 변화를 준다."""
     seed_key = f"{target_date.isoformat()}:{template_event_id}"
     sensor = event_json.get("sensor", {})
     process_metrics = event_json.get("processMetrics", {})
     process_data = event_json.get("processData", {})
 
+    # 각 센서 값을 먼저 바꾼 뒤 processData와 설비 상태를 다시 동기화한다.
     _vary_current(sensor.get("current", {}), seed_key)
     _vary_vibration(sensor.get("vibration", {}), seed_key)
     _vary_robot_arm_vibration(sensor.get("robotArmVibration", {}), seed_key)
@@ -995,6 +1151,7 @@ def _sync_process_data(
     metrics: dict[str, Any],
     seed_key: str,
 ) -> None:
+    """변동된 센서/공정 지표와 공정별 processData의 파생값을 일치시킨다."""
     if not process_data:
         return
 
@@ -1059,11 +1216,21 @@ def _sync_process_data(
             0,
             min(2, _as_int(assembly.get("missingPartCount")) + (1 if delta else 0)),
         )
-        assembly["actualSequence"] = (
-            "A01>A03>A02>A04"
-            if sequence_error_count
-            else "A01>A02>A03>A04"
-        )
+        expected_sequence = str(assembly.get("expectedSequence", ""))
+        expected_steps = expected_sequence.split(">")
+        if len(expected_steps) == 4:
+            assembly["actualSequence"] = (
+                ">".join(
+                    [
+                        expected_steps[0],
+                        expected_steps[2],
+                        expected_steps[1],
+                        expected_steps[3],
+                    ],
+                )
+                if sequence_error_count
+                else expected_sequence
+            )
 
 
 def _refresh_equipment_status(
@@ -1071,34 +1238,13 @@ def _refresh_equipment_status(
     sensor: dict[str, Any],
     metrics: dict[str, Any],
 ) -> None:
+    """날짜별 수치 변동 후에도 생성된 상태와 이상 분류를 그대로 유지한다."""
     equipment_status = event_json.get("equipmentStatus", {})
-    idle_time = _as_float(metrics.get("equipmentIdleTimeSec"))
-    station_delay = _as_float(metrics.get("stationDelaySec"))
-    vibration_score = max(
-        _as_float(sensor.get("vibration", {}).get("vibrationScore")),
-        _as_float(sensor.get("robotArmVibration", {}).get("vibrationScore")),
-    )
-    defect_score = _as_float(
-        event_json.get("processData", {}).get("paint", {}).get("defectScore"),
-    )
-
-    if idle_time >= 20.0:
-        operation_status = "IDLE"
-    elif station_delay >= 12.0 or vibration_score >= 0.82 or defect_score >= 0.75:
-        operation_status = "ERROR"
-    else:
-        operation_status = "RUNNING"
-
-    health_status = (
-        "WARNING"
-        if operation_status != "RUNNING"
-        or station_delay >= 8.0
-        or vibration_score >= 0.65
-        or defect_score >= 0.45
-        else "NORMAL"
-    )
-    equipment_status["operationStatus"] = operation_status
-    equipment_status["healthStatus"] = health_status
+    # 센서와 지표는 날짜별로 변동하지만 정상/이상 7:3 분포와 최초 랜덤
+    # operationStatus는 변경하지 않는다.
+    _ = sensor, metrics
+    equipment_status["lastNormalTime"] = None
+    equipment_status["statusChangedTime"] = None
 
 
 def _jitter_numeric(
@@ -1127,6 +1273,7 @@ def _factor(seed_key: str, field: str, pct: float) -> float:
 
 
 def _noise(seed_key: str, field: str, low: float, high: float) -> float:
+    """해시 기반 의사 난수로 같은 날짜·이벤트·필드에 같은 변동값을 반환한다."""
     digest = hashlib.blake2b(
         f"{seed_key}:{field}".encode("utf-8"),
         digest_size=8,
