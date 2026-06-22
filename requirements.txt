@@ -13,8 +13,11 @@ httpx>=0.28.0
 openai>=1.59.0,<2.0.0
 
 # Kafka
-aiokafka>=0.12.0
-confluent-kafka>=2.6.0
+kafka-python>=2.3.0,<3.0.0
+aws-msk-iam-sasl-signer-python>=1.0.2,<2.0.0
+boto3>=1.26.125,<2.0.0
+botocore>=1.29.125,<2.0.0
+click>=7.0,<9.0
 
 # Redis Cache
 redis>=5.2.0,<6.0.0
