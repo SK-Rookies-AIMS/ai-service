@@ -3,13 +3,21 @@ from datetime import datetime
 import pandas as pd
 import random
 
-DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-"
-    "@127.0.0.1:13306/sampledb"
+SAMPLE_DATABASE_URL = (
+    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/sampledb"
 )
 
-engine = create_engine(
-    DATABASE_URL,
+MAIN_DATABASE_URL = (
+    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
+)
+
+sample_engine = create_engine(
+    SAMPLE_DATABASE_URL,
+    pool_pre_ping=True
+)
+
+main_engine = create_engine(
+    MAIN_DATABASE_URL,
     pool_pre_ping=True
 )
 
@@ -22,7 +30,7 @@ process_names = [
     "Final"
 ]
 
-with engine.connect() as conn:
+with sample_engine.connect() as conn:
 
     total_vehicle_count = conn.execute(
         text("""
@@ -95,7 +103,6 @@ for date_row in date_rows:
 
         process_id += 1
 
-csv_file = "inspection_process.csv"
 df = pd.DataFrame(
     inspection_process_list,
     columns=[
@@ -110,13 +117,13 @@ df = pd.DataFrame(
     ]
 )
 
-df.to_csv(
-    "inspection_process.csv",
-    index=False,
-    encoding="utf-8-sig"
+df.to_sql(
+    name="inspection_process",
+    con=main_engine,
+    if_exists="append",
+    index=False
 )
 
-print(df.head(20))
-print()
-print(f"CSV 저장 완료: {csv_file}")
-print(f"총 {len(df)}건")
+print(
+    f"inspection_process table 전송 완료"
+)
