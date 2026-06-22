@@ -243,3 +243,169 @@ FastAPI
 - 모든 요청 흐름은 FastAPI를 통해 중앙 집중적으로 처리됩니다.
 - Kubernetes 환경에서는 `ai-services` Namespace 내 Pod로 배포됩니다.
 - 향후 AI 서비스 추가 시 FastAPI에서 Orchestration만 확장하면 되므로 확장성이 높습니다.
+
+## 제조 이벤트 데이터 생성
+
+제조 이벤트 생성 기능은 기존 `car_master`와 `equipment` 마스터를 참조하여
+`manufacturing_event_json`에 원천 이벤트를 저장합니다. 차량 마스터를 생성하거나
+수정하지 않으며, `car_master.id=1`부터 요청한 차량 수만큼 순서대로 매핑합니다.
+
+### 기본 생성 규칙
+
+- 차량 수: `vehicle_id`의 생산일자가 요청 날짜와 일치하는 `car_master` 전체
+- 차량당 이벤트 수: 4건
+- 전체 이벤트 수: 해당 날짜 차량 수 × 4
+- 공정 순서: `PRESS -> BODY -> PAINT -> ASSEMBLY`
+- 공정별 이벤트 수: 해당 날짜 차량 수와 동일
+- 정상/이상 비율: 약 7:3
+- 공정별 이상 이벤트: 각 공정에 균등 분배
+- 설비: 차량의 공정마다 1~5호기 중 독립적으로 결정
+- 최초 발행 상태: `PRESS=READY`, 나머지 공정은 `PENDING`
+
+예를 들어 `AVANTE-20260601-10474`처럼 `vehicle_id`에 `20260601`이 포함된
+차량이 10,700대라면 정상 7,490대, 폐기(이상) 3,210대로 구성하고 총
+42,800건의 이벤트를 생성합니다.
+
+`event_count`와 `car_pool_size`의 기본값은 `null`입니다. 값을 생략하면 해당
+생산일자의 차량 전체를 사용합니다. 제한값을 지정한다면 `event_count`는
+`car_pool_size * 4`와 같아야 합니다.
+
+### 이벤트 JSON 구조
+
+`manufacturing_event_json.event_json`에는 아래 최상위 필드만 저장합니다.
+아래 JSON은 필드 위치를 보여주는 축약 예시이며, 실제 생성 시 `sensor`,
+`processMetrics`, `sourceTrace`, `processData`의 공정별 상세 값이 채워집니다.
+
+```json
+{
+  "event": {
+    "eventId": "EVT-20260601-000001",
+    "eventTime": null,
+    "eventType": "PROCESS_STATUS",
+    "eventName": "프레스 공정 통합 관제 이벤트"
+  },
+  "equipment": {
+    "equipmentCode": "EQ_PRESS_001",
+    "equipmentName": "프레스 유압모터 1호",
+    "equipmentType": "HYDRAULIC_PRESS"
+  },
+  "equipmentStatus": {
+    "operationStatus": "RUNNING",
+    "lastNormalTime": null,
+    "statusChangedTime": null
+  },
+  "product": {
+    "carMasterId": 1
+  },
+  "sensor": {},
+  "processMetrics": {},
+  "sourceTrace": {},
+  "processData": {
+    "press": {
+      "countIncreaseYn": true,
+      "targetCycleTimeSec": 40.0,
+      "timestampDelaySec": 5.7
+    }
+  }
+}
+```
+
+- `product.carMasterId`는 기존 `car_master.id`입니다.
+- DB 컬럼 `event_time`과 JSON의 `event.eventTime`은 최초 생성 시 `NULL`입니다.
+- `lastNormalTime`, `statusChangedTime`도 최초 생성 시 `NULL`입니다.
+- `operationStatus`는 정상 데이터의 경우 `RUNNING`/`IDLE`, 이상 데이터의 경우
+  `FAULT`/`STOPPED`/`MAINTENANCE` 중에서 결정됩니다.
+- 같은 차량과 공정은 재생성해도 동일한 상태를 갖도록 결정적 난수를 사용합니다.
+- `processData`에는 현재 공정에 해당하는 `press`, `body`, `paint`, `assembly`
+  블록 중 하나만 포함됩니다.
+
+### 생성 API
+
+모든 제조 이벤트 API prefix는 `/api/manufacturing/events`입니다.
+
+| Method | Endpoint | 설명 |
+| --- | --- | --- |
+| `POST` | `/templates/generate` | 날짜 재생용 템플릿 생성 |
+| `GET` | `/templates/{template_name}` | 저장된 템플릿 조회 |
+| `GET` | `/templates/{template_name}/replay` | DB 저장 없이 특정 날짜 기준 replay 조회 |
+| `POST` | `/generate` | 지정 날짜의 실제 이벤트 생성 및 적재 |
+| `POST` | `/generate/tomorrow` | 템플릿을 이용해 다음날 이벤트 적재 |
+| `GET` | `/generate/jobs/{job_id}` | 비동기 생성 job 상태 조회 |
+| `GET` | `/` | 저장된 이벤트 조회 |
+
+예를 들어 2026년 6월 1일 차량 전체의 이벤트는 Swagger에서 `POST /generate`를
+아래처럼 호출하여 생성할 수 있습니다.
+
+```text
+start_date=2026-06-01
+end_date=2026-06-01
+event_count=null
+car_pool_size=null
+insert_chunk_size=1000
+```
+
+API는 즉시 `jobId`를 반환합니다. 이후
+`GET /api/manufacturing/events/generate/jobs/{jobId}`에서 `SUCCEEDED` 여부를
+확인합니다. 실패한 job을 다시 실행할 때는 `/generate`를 새로 호출하면 되며,
+동일한 `event_id`는 중복 생성하지 않고 갱신합니다.
+
+템플릿 생성도 `event_count`와 `car_pool_size`의 기본값은 `null`입니다.
+`production_date`와 `vehicle_id` 생산일자가 일치하는 차량 전체를 사용합니다.
+
+### 관련 테이블
+
+| 테이블 | 용도 |
+| --- | --- |
+| `car_master` | 기존 차량 마스터. 생성 로직은 조회만 수행 |
+| `equipment` | 공정별 설비 마스터 |
+| `manufacturing_event_json` | 실제 원천 이벤트 JSON |
+| `manufacturing_event_template` | 날짜별 재생에 사용하는 이벤트 템플릿 |
+| `manufacturing_event_generation_job` | 비동기 생성 작업 상태와 진행률 |
+
+### Repository 구조
+
+`SampleDbRepository`는 DB 연결과 아래 repository를 묶는 얇은 facade입니다.
+테이블별 SQL과 상태 관리 로직은 각각의 repository에 위치합니다.
+
+```text
+app/repository/
+├── sampledb_repository.py
+├── sampledb_schema.py
+├── sampledb_schema_manager.py
+├── car_master_repository.py
+├── equipment_repository.py
+├── manufacturing_event_repository.py
+├── manufacturing_event_template_repository.py
+└── manufacturing_generation_job_repository.py
+```
+
+- `CarMasterRepository`: 기존 차량 조회 및 ID 매핑
+- `EquipmentRepository`: 기본 설비 초기화 및 조회
+- `ManufacturingEventRepository`: 이벤트 저장·갱신·조회 및 데드락 재시도
+- `ManufacturingEventTemplateRepository`: 템플릿 저장·조회·삭제
+- `ManufacturingGenerationJobRepository`: job 상태·진행률 및 DB 전역 실행 잠금
+- `SampleDbSchemaManager`: 테이블 생성과 점진적 스키마 마이그레이션
+
+MySQL 오류 `1205` 또는 `1213`이 발생하면 이벤트 저장 청크를 자동으로
+재시도합니다. 다중 프로세스나 `uvicorn --reload` 환경에서는 DB advisory lock으로
+생성 job이 동시에 실행되지 않도록 직렬화합니다.
+
+### 환경변수
+
+아래 값은 코드 기본값이 있으므로 `.env`에 없더라도 동일하게 동작합니다.
+운영 환경에서 값을 변경할 때만 설정하면 됩니다.
+
+```dotenv
+MANUFACTURING_EVENT_SCHEDULER_ENABLED=true
+MANUFACTURING_EVENT_INSERT_CHUNK_SIZE=1000
+```
+
+`MANUFACTURING_EVENT_SCHEDULER_EVENTS_PER_DAY`과
+`MANUFACTURING_EVENT_CAR_POOL_SIZE`를 생략하면 대상 날짜의 차량 전체를
+사용합니다.
+
+스케줄러를 사용하지 않으려면 다음과 같이 설정합니다.
+
+```dotenv
+MANUFACTURING_EVENT_SCHEDULER_ENABLED=false
+```

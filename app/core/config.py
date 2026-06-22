@@ -34,16 +34,16 @@ class Settings(BaseSettings):
         default=True,
         alias="MANUFACTURING_EVENT_SCHEDULER_ENABLED",
     )
-    manufacturing_event_scheduler_events_per_day: int = Field(
-        default=86_400,
+    manufacturing_event_scheduler_events_per_day: int | None = Field(
+        default=None,
         alias="MANUFACTURING_EVENT_SCHEDULER_EVENTS_PER_DAY",
     )
-    manufacturing_event_template_event_count: int = Field(
-        default=86_400,
+    manufacturing_event_template_event_count: int | None = Field(
+        default=None,
         alias="MANUFACTURING_EVENT_TEMPLATE_EVENT_COUNT",
     )
-    manufacturing_event_car_pool_size: int = Field(
-        default=10_000,
+    manufacturing_event_car_pool_size: int | None = Field(
+        default=None,
         alias="MANUFACTURING_EVENT_CAR_POOL_SIZE",
     )
     manufacturing_event_insert_chunk_size: int = Field(

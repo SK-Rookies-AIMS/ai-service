@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import statistics
@@ -12,8 +13,162 @@ from typing import Any
 import pandas as pd
 
 
+# PRD의 차량 생산 순서다. 한 차량마다 아래 4개 공정 이벤트를 정확히 한 건씩 만든다.
 PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
-LINE_STATION_COUNT = 4
+PROCESS_ROUTE_PREFIX = {
+    "PRESS": "P",
+    "BODY": "B",
+    "PAINT": "PA",
+    "ASSEMBLY": "A",
+}
+
+# PRD 기준 공정별 설비 수와 목표 이상 데이터 비율이다.
+LINE_STATION_COUNT = 5
+ABNORMAL_RATIO = 0.30
+PROCESS_DATA_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
+    "PRESS": frozenset(
+        {
+            "countIncreaseYn",
+            "targetCycleTimeSec",
+            "timestampDelaySec",
+        },
+    ),
+    "BODY": frozenset(
+        {
+            "robotMotionStatus",
+            "robotOperationMode",
+            "frequencyPeakBand",
+            "frequencyBands",
+        },
+    ),
+    "PAINT": frozenset(
+        {
+            "imagePosition",
+            "thermalStdTemp",
+            "thicknessValue",
+            "defectScore",
+            "visionLabel",
+            "surfaceQualityScore",
+        },
+    ),
+    "ASSEMBLY": frozenset(
+        {
+            "expectedSequence",
+            "actualSequence",
+            "missingPartCount",
+            "fasteningErrorCount",
+            "sequenceErrorCount",
+        },
+    ),
+}
+PROCESS_DATA_KEY = {
+    "PRESS": "press",
+    "BODY": "body",
+    "PAINT": "paint",
+    "ASSEMBLY": "assembly",
+}
+
+
+def initial_dispatch_status(process_code: str) -> str:
+    """원천 이벤트 최초 발행 상태를 반환한다.
+
+    차량 생산 흐름은 PRESS부터 시작하므로 PRESS만 READY이며, BODY/PAINT/
+    ASSEMBLY는 이전 공정의 정상 분석 결과가 오기 전까지 PENDING이다.
+    """
+    return "READY" if process_code == "PRESS" else "PENDING"
+
+
+def is_abnormal_operation_status(operation_status: Any) -> bool:
+    """이벤트 JSON의 운전 상태가 이상 상태인지 반환한다."""
+    return operation_status in {"FAULT", "STOPPED", "MAINTENANCE"}
+
+
+def normalize_event_json(event_json: dict[str, Any]) -> dict[str, Any]:
+    """제조 이벤트 JSON을 PRD에 정의된 필드만 남긴 구조로 정규화한다."""
+    event = event_json.get("event", {})
+    equipment = event_json.get("equipment", {})
+    equipment_status = event_json.get("equipmentStatus", {})
+    product = event_json.get("product", {})
+    sensor = event_json.get("sensor", {})
+    current = sensor.get("current", {})
+    vibration = sensor.get("vibration", {})
+    robot = sensor.get("robotArmVibration", {})
+    thermal = sensor.get("thermal", {})
+    metrics = event_json.get("processMetrics", {})
+    source_trace = event_json.get("sourceTrace", {})
+
+    return {
+        "event": {
+            "eventId": event.get("eventId"),
+            "eventTime": None,
+            "eventType": event.get("eventType"),
+            "eventName": event.get("eventName"),
+        },
+        "equipment": {
+            "equipmentCode": equipment.get("equipmentCode"),
+            "equipmentName": equipment.get("equipmentName"),
+            "equipmentType": equipment.get("equipmentType"),
+        },
+        "equipmentStatus": {
+            "operationStatus": equipment_status.get("operationStatus"),
+            "lastNormalTime": None,
+            "statusChangedTime": None,
+        },
+        "product": {
+            "carMasterId": product.get("carMasterId"),
+        },
+        "sensor": {
+            "sensorType": sensor.get("sensorType"),
+            "current": {
+                "rmsAmpere": current.get("rmsAmpere"),
+                "maxAmpere": current.get("maxAmpere"),
+                "minAmpere": current.get("minAmpere"),
+            },
+            "vibration": {
+                "accelerationG": vibration.get("accelerationG"),
+                "vibrationScore": vibration.get("vibrationScore"),
+                "vibrationRms": vibration.get("vibrationRms"),
+                "vibrationPeak": vibration.get("vibrationPeak"),
+            },
+            "robotArmVibration": {
+                "robotId": robot.get("robotId"),
+                "axis": robot.get("axis"),
+                "frequencyHz": robot.get("frequencyHz"),
+                "amplitude": robot.get("amplitude"),
+                "vibrationRms": robot.get("vibrationRms"),
+                "vibrationPeak": robot.get("vibrationPeak"),
+                "vibrationScore": robot.get("vibrationScore"),
+            },
+            "thermal": {
+                "thermalScore": thermal.get("thermalScore"),
+                "avgTemperature": thermal.get("avgTemperature"),
+                "maxTemperature": thermal.get("maxTemperature"),
+                "minTemperature": thermal.get("minTemperature"),
+            },
+        },
+        "processMetrics": {
+            "cycleTimeSec": metrics.get("cycleTimeSec"),
+            "waitingTimeSec": metrics.get("waitingTimeSec"),
+            "processingTimeSec": metrics.get("processingTimeSec"),
+            "stationDelaySec": metrics.get("stationDelaySec"),
+            "throughputPerMin": metrics.get("throughputPerMin"),
+            "queueLength": metrics.get("queueLength"),
+            "wipCount": metrics.get("wipCount"),
+            "equipmentIdleTimeSec": metrics.get("equipmentIdleTimeSec"),
+        },
+        "sourceTrace": {
+            "fordRowId": source_trace.get("fordRowId"),
+            "formingRowId": source_trace.get("formingRowId"),
+            "robotArmVibrationRowId": source_trace.get(
+                "robotArmVibrationRowId",
+            ),
+            "machineVisionRowId": source_trace.get("machineVisionRowId"),
+            "boschId": source_trace.get("boschId"),
+        },
+        "processData": event_json.get("processData", {}),
+    }
+
+
 PROCESS_META: dict[str, dict[str, Any]] = {
     "PRESS": {
         "lineCode": "PRESS_LINE_01",
@@ -63,9 +218,13 @@ EVENT_DENSITY_WINDOWS: tuple[tuple[int, int, float], ...] = (
 
 @dataclass(frozen=True)
 class EventBuildRequest:
+    """한 번의 제조 이벤트 생성 작업에 필요한 범위와 마스터 데이터."""
+
     start_date: date
     end_date: date
+    # 기존 API 이름을 유지하지만 현재 의미는 기간 전체 이벤트 수다.
     events_per_day: int
+    # dict 삽입 순서가 car_master.id 오름차순을 보존한다.
     car_id_map: dict[str, int]
     equipment_map: dict[str, dict[str, Any]]
 
@@ -82,7 +241,10 @@ class ManufacturingEventJsonBuilder:
         return list(self.iter_rows(request))
 
     def iter_rows(self, request: EventBuildRequest) -> Iterator[dict[str, Any]]:
-        car_ids = sorted(request.car_id_map)
+        """차량 단위로 4공정 row를 순차 생성한다."""
+        # Repository가 car_master.id 오름차순으로 만든 순서를 그대로 사용해야
+        # PRD의 "id 1번 차량부터 생성" 조건을 지킬 수 있다.
+        car_ids = list(request.car_id_map)
         if not car_ids:
             return
 
@@ -90,21 +252,35 @@ class ManufacturingEventJsonBuilder:
         if days <= 0:
             return
 
-        global_index = 0
-        for day_offset in range(days):
-            current_date = request.start_date + timedelta(days=day_offset)
-            for slot in range(request.events_per_day):
-                process_index = global_index % len(PROCESS_SEQUENCE)
-                production_sequence_index = global_index // len(PROCESS_SEQUENCE)
-                process_code = PROCESS_SEQUENCE[process_index]
-                event_time = _event_time_for_slot(
-                    current_date=current_date,
-                    slot=slot,
-                    events_per_day=request.events_per_day,
+        # 차량마다 4건이므로 이벤트 수와 차량 수를 독립적으로 받을 수 없다.
+        # 여기서 다시 검증해 서비스 외부에서 Builder를 직접 호출해도 구조가 깨지지 않게 한다.
+        total_events = len(car_ids) * len(PROCESS_SEQUENCE)
+        if request.events_per_day != total_events:
+            raise ValueError(
+                "event_count는 car_pool_size * 4와 같아야 합니다: "
+                f"event_count={request.events_per_day}, expected={total_events}",
+            )
+
+        # 날짜별 실제 차량 수를 기준으로 정상 70% / 폐기(이상) 30%를 배치한다.
+        # 이상 차량도 4공정을 모두 가지므로 공정별 이상 건수가 자동으로 동일해진다.
+        abnormal_vehicle_count = round(len(car_ids) * ABNORMAL_RATIO)
+        normal_vehicle_count = len(car_ids) - abnormal_vehicle_count
+
+        for production_sequence_index, car_id in enumerate(car_ids):
+            car_master_id = request.car_id_map[car_id]
+            is_abnormal_vehicle = production_sequence_index >= normal_vehicle_count
+            # 같은 차량의 이벤트는 PRESS -> BODY -> PAINT -> ASSEMBLY 순서를 유지한다.
+            for process_index, process_code in enumerate(PROCESS_SEQUENCE):
+                global_index = (
+                    production_sequence_index * len(PROCESS_SEQUENCE) + process_index
                 )
-                sequence_no = slot + 1
-                event_id = f"EVT-{current_date:%Y%m%d}-{sequence_no:06d}"
-                car_id = car_ids[production_sequence_index % len(car_ids)]
+                event_time = _event_time_for_range_slot(
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    slot=global_index,
+                    total_events=total_events,
+                )
+                event_id = f"EVT-{event_time:%Y%m%d}-{global_index + 1:06d}"
                 event = self._build_event(
                     event_id=event_id,
                     event_time=event_time,
@@ -112,6 +288,8 @@ class ManufacturingEventJsonBuilder:
                     global_index=global_index,
                     production_sequence_index=production_sequence_index,
                     car_id=car_id,
+                    car_master_id=car_master_id,
+                    is_abnormal=is_abnormal_vehicle,
                     equipment_map=request.equipment_map,
                 )
                 equipment_code = event["equipment"]["equipmentCode"]
@@ -119,17 +297,22 @@ class ManufacturingEventJsonBuilder:
                 yield {
                     "event_id": event_id,
                     "event_time": event_time,
-                    "car_master_id": request.car_id_map[car_id],
+                    "car_master_id": car_master_id,
                     "equipment_id": int(equipment_row["id"]),
                     "process_code": process_code,
-                    "station_code": event["location"]["stationCode"],
+                    "station_code": f"{process_code}_STATION_{int(equipment_code.rsplit('_', 1)[1]):02d}",
                     "equipment_code": equipment_code,
                     "equipment_type": event["equipment"]["equipmentType"],
                     "equipment_status": event["equipmentStatus"]["operationStatus"],
                     "event_type": event["event"]["eventType"],
                     "event_json": _json_safe(event),
+                    # 최초에는 PRESS만 발행할 수 있다. 후속 공정은 이전 공정의
+                    # 정상 분석 결과를 받은 뒤 Consumer가 READY로 전환한다.
+                    "dispatch_status": initial_dispatch_status(process_code),
+                    "analysis_status": "NOT_ANALYZED",
+                    "retry_count": 0,
+                    "error_message": None,
                 }
-                global_index += 1
 
     def _build_event(
         self,
@@ -140,13 +323,22 @@ class ManufacturingEventJsonBuilder:
         global_index: int,
         production_sequence_index: int,
         car_id: str,
+        car_master_id: int,
+        is_abnormal: bool,
         equipment_map: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         meta = PROCESS_META[process_code]
-        line_station_no = production_sequence_index % LINE_STATION_COUNT + 1
+        # 같은 차량도 공정마다 서로 다른 설비를 사용할 수 있도록 차량 PK와
+        # 공정 코드를 함께 사용해 1~5호기를 독립적으로 배정한다.
+        # 해시 기반이라 분포는 랜덤하지만 재생성·템플릿 replay 결과는 동일하다.
+        line_station_no = _equipment_no_for_process(
+            car_master_id=car_master_id,
+            process_code=process_code,
+        )
         equipment_code = f"EQ_{process_code}_{line_station_no:03d}"
         equipment_row = equipment_map[equipment_code]
 
+        # 공개 데이터셋의 실제 행을 읽어 원천 추적 정보와 기본 센서 특성을 만든다.
         forming = self._forming_row(production_sequence_index)
         current = self._current_features(process_code, global_index)
         ford = self._ford_features(global_index)
@@ -160,22 +352,41 @@ class ManufacturingEventJsonBuilder:
             vision=vision,
             bosch=bosch,
         )
-        is_abnormal = self._is_abnormal(process_code, ford, vision, bosch, current)
-        operation_status = self._operation_status(is_abnormal, process_metrics)
+        # 원천 데이터의 실제 클래스 비율은 데이터셋마다 다르므로, PRD가 요구한
+        # 7:3 비율과 Java 판정 임계값을 안정적으로 만족하도록 프로필을 적용한다.
+        self._apply_detection_profile(
+            process_code=process_code,
+            is_abnormal=is_abnormal,
+            current=current,
+            ford=ford,
+            vision=vision,
+            bosch=bosch,
+            process_metrics=process_metrics,
+        )
+        process_data = self._process_data(
+            process_code=process_code,
+            car_master_id=car_master_id,
+            current=current,
+            ford=ford,
+            vision=vision,
+            bosch=bosch,
+            process_metrics=process_metrics,
+        )
+        validate_process_data(process_code, process_data)
+        equipment_status = _equipment_status_for_event(
+            car_master_id=car_master_id,
+            process_code=process_code,
+            is_abnormal=is_abnormal,
+        )
 
         return {
             "event": {
                 "eventId": event_id,
-                "eventTime": event_time.isoformat(),
-                "eventCategory": "MANUFACTURING",
+                # 원천 이벤트 생성 시점에는 실제 발생 시각이 확정되지 않았으므로
+                # DB event_time과 동일하게 JSON 내부 eventTime도 NULL로 둔다.
+                "eventTime": None,
                 "eventType": meta["eventType"],
                 "eventName": meta["eventName"],
-            },
-            "location": {
-                "factoryCode": "AIMS_FACTORY_01",
-                "lineCode": f"{process_code}_LINE_{line_station_no:02d}",
-                "processCode": process_code,
-                "stationCode": f"{process_code}_STATION_{line_station_no:02d}",
             },
             "equipment": {
                 "equipmentCode": equipment_code,
@@ -183,20 +394,16 @@ class ManufacturingEventJsonBuilder:
                 "equipmentType": equipment_row["equipment_type"],
             },
             "equipmentStatus": {
-                "operationStatus": operation_status,
-                "lastNormalTime": (event_time - timedelta(seconds=31)).isoformat(),
-                "statusChangedTime": event_time.isoformat(),
-                "healthStatus": "WARNING" if is_abnormal else "NORMAL",
+                # 운전 상태는 정상/이상 프로필 안에서 차량·공정별로 랜덤 생성한다.
+                # 시간 필드는 실제 이벤트 전송 전까지 미확정이므로 NULL로 둔다.
+                "operationStatus": equipment_status["operationStatus"],
+                "lastNormalTime": None,
+                "statusChangedTime": None,
             },
             "product": {
-                "carId": car_id,
-                "productId": f"PRODUCT-{int(car_id.rsplit('-', 1)[1]):06d}",
-                "itemNo": forming["itemno"],
-                "quantity": forming["quantity"],
-                "productionCount": forming["cnt"],
+                "carMasterId": car_master_id,
             },
             "sensor": self._sensor_payload(current, ford, vision, process_code),
-            "manufacturing": self._manufacturing_payload(process_code, forming),
             "processMetrics": process_metrics,
             "sourceTrace": {
                 "fordRowId": ford["rowId"],
@@ -205,15 +412,101 @@ class ManufacturingEventJsonBuilder:
                 "machineVisionRowId": vision["rowId"],
                 "boschId": bosch["id"],
             },
-            "processData": self._process_data(
-                process_code=process_code,
-                current=current,
-                ford=ford,
-                vision=vision,
-                bosch=bosch,
-                process_metrics=process_metrics,
-            ),
+            # process_code에 해당하는 블록 하나만 포함한다.
+            # PRESS면 press, BODY면 body, PAINT면 paint, ASSEMBLY면 assembly만 존재한다.
+            "processData": process_data,
         }
+
+    def _apply_detection_profile(
+        self,
+        *,
+        process_code: str,
+        is_abnormal: bool,
+        current: dict[str, Any],
+        ford: dict[str, Any],
+        vision: dict[str, Any],
+        bosch: dict[str, Any],
+        process_metrics: dict[str, Any],
+    ) -> None:
+        """PRD의 Java 판정식에서 정상/이상이 명확히 갈리도록 입력값을 보정한다.
+
+        이상 프로필은 전류·진동·열화상·지연·조립 오류를 함께 높여 모든 공정의
+        전용 위험도가 임계값을 넘게 한다. 정상 프로필은 반대로 충분한 여유를 둬
+        날짜별 작은 변동이 적용되어도 정상 범위를 벗어나지 않게 한다.
+        """
+        target = float(PROCESS_META[process_code]["targetCycleTimeSec"])
+        if is_abnormal:
+            # 설비 위험 및 불량 전이 위험을 높이는 공통 센서 프로필.
+            current.update(
+                rmsAmpere=4.2,
+                maxAmpere=4.8,
+                minAmpere=3.7,
+                accelerationG=0.085,
+            )
+            ford.update(
+                label=-1,
+                vibrationScore=0.90,
+                vibrationRms=2.88,
+                vibrationPeak=4.10,
+            )
+            vision.update(
+                label=1,
+                avgTemperature=54.0,
+                maxTemperature=62.0,
+                minTemperature=45.0,
+                thermalStdTemp=6.0,
+                defectScore=0.90,
+                thicknessValue=132.0,
+                surfaceQualityScore=60.0,
+            )
+            bosch["response"] = 1
+            # 병목 위험도도 함께 높아지도록 지연, WIP, 유휴 시간을 보정한다.
+            process_metrics.update(
+                cycleTimeSec=target + 16.0,
+                waitingTimeSec=18.0,
+                processingTimeSec=target - 2.0,
+                stationDelaySec=16.0,
+                throughputPerMin=round(60 / (target + 16.0), 3),
+                queueLength=14,
+                wipCount=38,
+                equipmentIdleTimeSec=22.0,
+            )
+            return
+
+        # 정상 프로필은 PRD 기준 cycle time과 낮은 센서 위험도를 사용한다.
+        current.update(
+            rmsAmpere=1.7,
+            maxAmpere=1.9,
+            minAmpere=1.5,
+            accelerationG=0.006,
+        )
+        ford.update(
+            label=1,
+            vibrationScore=0.12,
+            vibrationRms=0.32,
+            vibrationPeak=0.58,
+        )
+        vision.update(
+            label=0,
+            avgTemperature=39.0,
+            maxTemperature=41.0,
+            minTemperature=37.0,
+            thermalStdTemp=0.8,
+            defectScore=0.08,
+            thicknessValue=116.0,
+            surfaceQualityScore=97.0,
+        )
+        bosch["response"] = 0
+        process_metrics.update(
+            cycleTimeSec=target,
+            waitingTimeSec=2.0,
+            processingTimeSec=target - 2.0,
+            stationDelaySec=0.0,
+            throughputPerMin=round(60 / target, 3),
+            queueLength=1,
+            wipCount=4,
+            equipmentIdleTimeSec=0.0,
+        )
 
     def _forming_row(self, index: int) -> dict[str, Any]:
         df = self._load_forming()
@@ -376,31 +669,6 @@ class ManufacturingEventJsonBuilder:
             "equipmentIdleTimeSec": round(max(0.0, station_delay * 1.8), 3),
         }
 
-    def _is_abnormal(
-        self,
-        process_code: str,
-        ford: dict[str, Any],
-        vision: dict[str, Any],
-        bosch: dict[str, Any],
-        current: dict[str, Any],
-    ) -> bool:
-        if process_code in {"PRESS", "BODY"}:
-            return ford["label"] < 0 or current["rmsAmpere"] > 2.8
-        if process_code == "PAINT":
-            return vision["label"] == 1
-        return bosch["response"] == 1
-
-    def _operation_status(
-        self,
-        is_abnormal: bool,
-        process_metrics: dict[str, Any],
-    ) -> str:
-        if process_metrics["equipmentIdleTimeSec"] >= 20:
-            return "IDLE"
-        if is_abnormal and process_metrics["stationDelaySec"] >= 10:
-            return "ERROR"
-        return "RUNNING"
-
     def _sensor_payload(
         self,
         current: dict[str, Any],
@@ -436,27 +704,13 @@ class ManufacturingEventJsonBuilder:
                 "maxTemperature": vision["maxTemperature"],
                 "minTemperature": vision["minTemperature"],
             },
-            "primarySensorSource": _primary_sensor_source(process_code),
-        }
-
-    def _manufacturing_payload(
-        self,
-        process_code: str,
-        forming: dict[str, Any],
-    ) -> dict[str, Any]:
-        sequence_no = PROCESS_SEQUENCE.index(process_code) + 1
-        return {
-            "processSequence": sequence_no,
-            "previousProcessCode": PROCESS_SEQUENCE[sequence_no - 2] if sequence_no > 1 else None,
-            "nextProcessCode": PROCESS_SEQUENCE[sequence_no] if sequence_no < len(PROCESS_SEQUENCE) else None,
-            "targetQuantity": 200,
-            "completedQuantity": min(200, forming["quantity"] + 140),
         }
 
     def _process_data(
         self,
         *,
         process_code: str,
+        car_master_id: int,
         current: dict[str, Any],
         ford: dict[str, Any],
         vision: dict[str, Any],
@@ -493,16 +747,35 @@ class ManufacturingEventJsonBuilder:
                 },
             }
 
-        has_sequence_error = bool(bosch["response"])
-        return {
-            "assembly": {
-                "expectedSequence": "A01>A02>A03>A04",
-                "actualSequence": "A01>A03>A02>A04" if has_sequence_error else "A01>A02>A03>A04",
-                "missingPartCount": 1 if has_sequence_error and current["rmsAmpere"] > 2.3 else 0,
-                "fasteningErrorCount": 1 if has_sequence_error else 0,
-                "sequenceErrorCount": 1 if has_sequence_error else 0,
-            },
-        }
+        if process_code == "ASSEMBLY":
+            has_sequence_error = bool(bosch["response"])
+            expected_sequence = _equipment_route_for_car(car_master_id)
+            expected_steps = expected_sequence.split(">")
+            # 이상 데이터는 BODY와 PAINT 통과 순서를 바꿔 순서 오류를 표현한다.
+            abnormal_steps = [
+                expected_steps[0],
+                expected_steps[2],
+                expected_steps[1],
+                expected_steps[3],
+            ]
+            return {
+                "assembly": {
+                    "expectedSequence": expected_sequence,
+                    "actualSequence": (
+                        ">".join(abnormal_steps)
+                        if has_sequence_error
+                        else expected_sequence
+                    ),
+                    "missingPartCount": (
+                        1
+                        if has_sequence_error and current["rmsAmpere"] > 2.3
+                        else 0
+                    ),
+                    "fasteningErrorCount": 1 if has_sequence_error else 0,
+                    "sequenceErrorCount": 1 if has_sequence_error else 0,
+                },
+            }
+        raise ValueError(f"지원하지 않는 process_code입니다: {process_code}")
 
     def _load_forming(self) -> pd.DataFrame:
         return self._cached_csv(
@@ -639,7 +912,35 @@ def _event_time_for_slot(
     return day_start + timedelta(microseconds=offset_microseconds)
 
 
+def _event_time_for_range_slot(
+    *,
+    start_date: date,
+    end_date: date,
+    slot: int,
+    total_events: int,
+) -> datetime:
+    """전체 이벤트를 날짜 범위에 균등 분할한 뒤 일별 생산 밀도를 적용한다."""
+    days = (end_date - start_date).days + 1
+    # 나머지는 앞 날짜부터 한 건씩 배분해 전체 건수가 정확히 유지되게 한다.
+    base_count, remainder = divmod(total_events, days)
+    day_offset = 0
+    day_start_slot = 0
+    for candidate_day in range(days):
+        events_on_day = base_count + (1 if candidate_day < remainder else 0)
+        if slot < day_start_slot + events_on_day:
+            day_offset = candidate_day
+            local_slot = slot - day_start_slot
+            return _event_time_for_slot(
+                current_date=start_date + timedelta(days=day_offset),
+                slot=local_slot,
+                events_per_day=events_on_day,
+            )
+        day_start_slot += events_on_day
+    return datetime.combine(end_date, time.max)
+
+
 def _weighted_event_offset_us(slot: int, events_per_day: int) -> int:
+    """일별 slot을 시간대별 생산 밀도에 맞는 microsecond offset으로 변환한다."""
     windows = _weighted_event_windows(events_per_day)
     remaining_slot = slot
     for start_us, end_us, count in windows:
@@ -705,19 +1006,98 @@ def _largest_fraction_window_index(
 
 
 def _deterministic_jitter_us(slot: int, interval_us: int) -> int:
+    """재실행 결과는 같게 유지하면서 이벤트 시각의 기계적인 등간격을 완화한다."""
     jitter_window = max(1, interval_us // 5)
     pseudo_random = (slot * 1103515245 + 12345) & 0x7FFFFFFF
     return pseudo_random % (2 * jitter_window + 1) - jitter_window
 
 
-def _primary_sensor_source(process_code: str) -> str:
-    if process_code == "PRESS":
-        return "PRESS_CURRENT_AND_FORD_VIBRATION"
-    if process_code == "BODY":
-        return "ROBOT_CURRENT_AND_FORD_VIBRATION"
-    if process_code == "PAINT":
-        return "MACHINE_VISION_THERMAL"
-    return "BOSCH_PRODUCTION_LINE"
+def _equipment_no_for_process(*, car_master_id: int, process_code: str) -> int:
+    """차량·공정 조합별로 독립적인 설비 번호(1~5)를 결정한다.
+
+    일반 random 모듈을 사용하면 배치를 다시 실행할 때 설비가 달라질 수 있다.
+    이벤트 재생성과 upsert가 안정적으로 동작하도록 같은 입력에는 항상 같은
+    번호가 나오는 해시 기반 결정적 랜덤 방식을 사용한다.
+    """
+    digest = hashlib.blake2b(
+        f"{car_master_id}:{process_code}:equipment".encode("utf-8"),
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(digest, "big") % LINE_STATION_COUNT + 1
+
+
+def _equipment_route_for_car(car_master_id: int) -> str:
+    """차량이 통과할 4개 공정의 실제 설비 경로를 문자열로 만든다.
+
+    예: PRESS 2호, BODY 3호, PAINT 1호, ASSEMBLY 4호
+    -> P02>B03>PA01>A04
+    """
+    return ">".join(
+        (
+            f"{PROCESS_ROUTE_PREFIX[process_code]}"
+            f"{_equipment_no_for_process(car_master_id=car_master_id, process_code=process_code):02d}"
+        )
+        for process_code in PROCESS_SEQUENCE
+    )
+
+
+def _equipment_status_for_event(
+    *,
+    car_master_id: int,
+    process_code: str,
+    is_abnormal: bool,
+) -> dict[str, str]:
+    """정상/이상 유형에 맞는 설비 상태를 결정적 랜덤으로 선택한다.
+
+    정상 데이터는 RUNNING/IDLE, 이상 데이터는 FAULT/STOPPED/MAINTENANCE
+    상태군에서 선택한다. 같은 차량·공정은 재생성해도 같은 상태를 갖는다.
+    """
+    digest = hashlib.blake2b(
+        f"{car_master_id}:{process_code}:status".encode("utf-8"),
+        digest_size=8,
+    ).digest()
+    ratio = int.from_bytes(digest, "big") % 100
+
+    if not is_abnormal:
+        operation_status = "RUNNING" if ratio < 85 else "IDLE"
+    elif ratio < 50:
+        operation_status = "FAULT"
+    elif ratio < 80:
+        operation_status = "STOPPED"
+    else:
+        operation_status = "MAINTENANCE"
+
+    return {"operationStatus": operation_status}
+
+
+def validate_process_data(
+    process_code: str,
+    process_data: dict[str, Any],
+) -> None:
+    """processData가 공정별 전용 JSON 구조를 정확히 따르는지 검증한다."""
+    expected_key = PROCESS_DATA_KEY.get(process_code)
+    required_fields = PROCESS_DATA_REQUIRED_FIELDS.get(process_code)
+    if expected_key is None or required_fields is None:
+        raise ValueError(f"지원하지 않는 process_code입니다: {process_code}")
+
+    if set(process_data) != {expected_key}:
+        raise ValueError(
+            f"{process_code} processData는 {expected_key} 블록만 포함해야 합니다: "
+            f"actual={sorted(process_data)}",
+        )
+
+    process_payload = process_data.get(expected_key)
+    if not isinstance(process_payload, dict):
+        raise ValueError(
+            f"{process_code} processData.{expected_key}는 JSON object여야 합니다.",
+        )
+
+    missing_fields = required_fields - set(process_payload)
+    if missing_fields:
+        raise ValueError(
+            f"{process_code} processData 필수 필드가 누락되었습니다: "
+            f"{sorted(missing_fields)}",
+        )
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

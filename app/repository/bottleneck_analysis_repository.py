@@ -130,7 +130,7 @@ class BottleneckAnalysisRepository:
             "product_process_history",
             self.metadata,
             Column("id", BigInteger, primary_key=True, autoincrement=True),
-            # sampledb manufacturing_event.id에 대한 논리 참조이며 DB 간 FK는 두지 않음
+            # 원천 제조 이벤트 식별자에 대한 논리 참조이며 DB 간 FK는 두지 않음
             Column("manufacturing_event_id", BigInteger),
             # sampledb car_master.id에 대한 논리 참조이며 DB 간 FK는 두지 않음
             Column("car_master_id", BigInteger),

@@ -39,3 +39,6 @@ Thumbs.db
 
 # DataSet
 datasets/
+
+# Docs
+app/docs/PRD_*.md
