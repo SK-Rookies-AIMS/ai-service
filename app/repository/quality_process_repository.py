@@ -1,19 +1,14 @@
-from sqlalchemy import create_engine, text
-from datetime import datetime
+from sqlalchemy import create_engine
 import pandas as pd
 import random
+from dotenv import load_dotenv
+import os
 
-SAMPLE_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/sampledb"
-)
+from app.kafka.consumer import create_consumer
+from app.kafka.topics import QUALITY_INSPECTION_PROCESS
 
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
-)
-
-sample_engine = create_engine(
-    SAMPLE_DATABASE_URL,
-    pool_pre_ping=True
+    os.getenv("MAIN_DATABASE_END")
 )
 
 main_engine = create_engine(
@@ -21,7 +16,10 @@ main_engine = create_engine(
     pool_pre_ping=True
 )
 
-inspection_process_list = []
+consumer = create_consumer(
+    topic=QUALITY_INSPECTION_PROCESS,
+    group_id="ai-process-group"
+)
 
 process_names = [
     "Visual",
@@ -30,100 +28,82 @@ process_names = [
     "Final"
 ]
 
-with sample_engine.connect() as conn:
+process_id = 1
+inspection_process_list = []
 
-    total_vehicle_count = conn.execute(
-        text("""
-            SELECT COUNT(*)
-            FROM car_master
-        """)
-    ).scalar()
+try:
+    print("Consumer 시작")
+    print("구독 토픽", consumer.subscription())
+    for msg in consumer:
 
-    date_rows = conn.execute(
-        text("""
-            SELECT
-                DATE(created_at) AS process_date,
-                COUNT(*) AS vehicle_count
-            FROM car_master
-            GROUP BY DATE(created_at)
-            ORDER BY process_date
-        """)
-    ).mappings().all()
+        row = msg.value
 
-    process_id = 1
+        print(f"Kafka 수신 : {row}")
 
-for date_row in date_rows:
+        process_date = row["process_date"]
+        total_vehicle_count = row["vehicle_count"]
 
-    process_date = date_row["process_date"]
+        for process_name in process_names:
 
-    total_vehicle_count = date_row["vehicle_count"]
+            completed_count = random.randint(
+                int(total_vehicle_count * 0.5),
+                total_vehicle_count
+            )
 
-    for process_name in process_names:
+            waiting_count = (
+                total_vehicle_count
+                - completed_count
+            )
 
-        completed_count = random.randint(
-            int(total_vehicle_count * 0.5),
-            total_vehicle_count
+            progress_rate = round(
+                completed_count
+                / total_vehicle_count
+                * 100,
+                0
+            )
+
+            if progress_rate >= 90:
+                process_status = "COMPLETE"
+
+            elif progress_rate >= 70:
+                process_status = "RUNNING"
+
+            else:
+                process_status = "WAIT"
+
+            inspection_process_list.append({
+                "id": process_id,
+                "process_name": process_name,
+                "total_vehicle_count": total_vehicle_count,
+                "completed_count": completed_count,
+                "waiting_count": waiting_count,
+                "progress_rate": progress_rate,
+                "process_status": process_status,
+                "created_at": process_date
+            })
+
+            process_id += 1
+
+        # 날짜 하나당 4개 공정 생성
+        df = pd.DataFrame(
+            inspection_process_list
         )
 
-        waiting_count = (
-            total_vehicle_count
-            - completed_count
+        df.to_sql(
+            name="inspection_process",
+            con=main_engine,
+            if_exists="append",
+            index=False
         )
 
-        progress_rate = round(
-            completed_count
-            / total_vehicle_count
-            * 100,
-            0
+        print(
+            f"{len(inspection_process_list)}건 저장 완료"
         )
 
-        if progress_rate >= 90:
-            process_status = "COMPLETE"
+        inspection_process_list.clear()
 
-        elif progress_rate >= 70:
-            process_status = "RUNNING"
+except Exception as e:
+    print(f"오류 발생 : {e}")
 
-        else:
-            process_status = "WAIT"
-
-        inspection_process = {
-            "id": process_id,
-            "process_name": process_name,
-            "total_vehicle_count": total_vehicle_count,
-            "completed_count": completed_count,
-            "waiting_count": waiting_count,
-            "progress_rate": progress_rate,
-            "process_status": process_status,
-            "created_at": process_date
-        }
-
-        inspection_process_list.append(
-            inspection_process
-        )
-
-        process_id += 1
-
-df = pd.DataFrame(
-    inspection_process_list,
-    columns=[
-        "id",
-        "process_name",
-        "total_vehicle_count",
-        "completed_count",
-        "waiting_count",
-        "progress_rate",
-        "process_status",
-        "created_at"
-    ]
-)
-
-df.to_sql(
-    name="inspection_process",
-    con=main_engine,
-    if_exists="append",
-    index=False
-)
-
-print(
-    f"inspection_process table 전송 완료"
-)
+finally:
+    consumer.close()
