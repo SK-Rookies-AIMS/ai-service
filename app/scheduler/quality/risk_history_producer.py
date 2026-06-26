@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, text
 from kafka import KafkaProducer
 from dotenv import load_dotenv
 import os
+from urllib.parse import quote_plus
 
 from datetime import datetime, timedelta
 
@@ -11,8 +12,17 @@ import time
 from app.kafka.iam_provider import MSKTokenProvider
 
 load_dotenv()
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = quote_plus(
+    os.getenv("DB_PASSWORD")
+)
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+SAMPLE_DB_NAME = os.getenv("SAMPLE_DB_NAME")
+
 SAMPLE_DATABASE_URL = (
-    os.getenv("SAMPLE_DATABASE_END")
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
 )
 
 sample_engine = create_engine(
