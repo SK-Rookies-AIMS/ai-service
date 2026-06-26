@@ -71,7 +71,7 @@ try:
 
         if len(
             inspection_risk_history_list
-        ) >= 20:
+        ) >= 4:
 
             df = pd.DataFrame(
                 inspection_risk_history_list
