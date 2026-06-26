@@ -9,7 +9,7 @@ import time
 from app.kafka.iam_provider import MSKTokenProvider
 
 SAMPLE_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.amazonaws.com:3306/sampledb"
+    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.rds.amazonaws.com:3306/sampledb"
 )
 
 sample_engine = create_engine(
