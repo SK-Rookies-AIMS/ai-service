@@ -64,6 +64,7 @@ try:
     print("구독 토픽", consumer.subscription())
     for msg in consumer:
         row = msg.value
+        print(f"Message : {json.dumps(row, ensure_ascii=False)}")
         vehicle_id = row["vehicle_id"]
         car_code = vehicle_id.split("-")[0]
 
