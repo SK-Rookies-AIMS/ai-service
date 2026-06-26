@@ -53,7 +53,7 @@ try:
 
         if len(
             inspection_risk_trend_list
-        ) >= 20:
+        ) >= 3:
 
             df = pd.DataFrame(
                 inspection_risk_trend_list
