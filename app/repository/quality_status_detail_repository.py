@@ -1,18 +1,13 @@
-from sqlalchemy import create_engine, text
-from decimal import Decimal
+from sqlalchemy import create_engine
 import pandas as pd
 
-SAMPLE_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@127.0.0.1:13306/sampledb"
+from app.kafka.consumer import create_consumer
+from app.kafka.topics import (
+    QUALITY_INSPECTION_STATUS_DETAIL
 )
 
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@127.0.0.1:13306/maindb"
-)
-
-sample_engine = create_engine(
-    SAMPLE_DATABASE_URL,
-    pool_pre_ping=True
+    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.rds.amazonaws.com:3306/maindb"
 )
 
 main_engine = create_engine(
@@ -20,128 +15,108 @@ main_engine = create_engine(
     pool_pre_ping=True
 )
 
-def calculate_status_score(status, control):
+consumer = create_consumer(
+    topic=QUALITY_INSPECTION_STATUS_DETAIL,
+    group_id="ai-status-detail-group"
+)
 
-    score = 100
-    issues = []
+inspection_status_detail_list = []
 
-    speed = float(status["speed"])
-    rpm = int(status["att"])
-    battery = float(status["battery_voltage"])
+try:
 
-    if speed > 120:
-        score -= 20
-        issues.append("over speed")
+    print("Consumer 시작")
+    print("구독 토픽 :", consumer.subscription())
 
-    if rpm > 4000:
-        score -= 20
-        issues.append("RPM Error")
+    for msg in consumer:
 
-    if battery < 12.0:
-        score -= 10
-        issues.append("battery drop")
+        row = msg.value
 
-    if control["collision_warning"] == 1:
-        score -= 40
-        issues.append("crash warning")
+        print("=" * 50)
+        print("[Kafka 메시지 수신]")
+        print(row)
+        print("=" * 50)
 
-    if status["gear"] == "P" and speed > 20:
-        score -= 30
-        issues.append("Parking")
+        inspection_status_detail_list.append({
+            "car_code":
+                row["car_code"],
 
-    return max(score, 0), issues
+            "inspection_no":
+                row["inspection_no"],
 
+            "vehicle_id":
+                row["vehicle_id"],
 
-def get_result(score):
+            "speed":
+                row["speed"],
 
-    if score >= 90:
-        return "PASS"
+            "att":
+                row["att"],
 
-    if score >= 70:
-        return "WARN"
+            "gear":
+                row["gear"],
 
-    return "FAIL"
+            "battery_voltage":
+                row["battery_voltage"],
 
+            "fuel_rate":
+                row["fuel_rate"],
 
-with sample_engine.connect() as conn:
+            "status_score":
+                row["status_score"],
 
-    master_rows = conn.execute(
-        text("""
-            SELECT *
-            FROM car_master
-        """)
-    ).mappings().all()
+            "inspection_result":
+                row["inspection_result"],
 
-    inspection_status_detail_list = []
+            "issue_message":
+                row["issue_message"],
 
-    for master_row in master_rows:
+            "created_at":
+                row["created_at"]
+        })
 
-        vehicle_id = master_row["vehicle_id"]
+        # 100건씩 저장
+        if len(
+            inspection_status_detail_list
+        ) >= 100:
 
-        status_row = conn.execute(
-            text("""
-                SELECT *
-                FROM car_status
-                WHERE vehicle_id = :vehicle_id
-                ORDER BY created_at DESC
-                LIMIT 1
-            """),
-            {
-                "vehicle_id": vehicle_id
-            }
-        ).mappings().first()
+            df = pd.DataFrame(
+                inspection_status_detail_list
+            )
 
-        control_row = conn.execute(
-            text("""
-                SELECT *
-                FROM car_control
-                WHERE vehicle_id = :vehicle_id
-                ORDER BY created_at DESC
-                LIMIT 1
-            """),
-            {
-                "vehicle_id": vehicle_id
-            }
-        ).mappings().first()
+            df.to_sql(
+                name="inspection_status_detail",
+                con=main_engine,
+                if_exists="append",
+                index=False
+            )
 
-        if not status_row or not control_row:
-            continue
+            print(
+                f"{len(inspection_status_detail_list)}건 저장 완료"
+            )
 
-        score, issues = calculate_status_score(
-            status_row,
-            control_row
+            inspection_status_detail_list.clear()
+
+except Exception as e:
+
+    print(f"오류 발생 : {e}")
+
+finally:
+
+    if inspection_status_detail_list:
+
+        df = pd.DataFrame(
+            inspection_status_detail_list
         )
 
-        inspection_status_detail = {
-            "car_code": vehicle_id.split("-")[0],
-            "inspection_no": f"STATUS-{master_row['id']:05d}",
-            "vehicle_id": vehicle_id,
-            "speed": float(status_row["speed"]),
-            "att": int(status_row["att"]),
-            "gear": status_row["gear"],
-            "battery_voltage": float(status_row["battery_voltage"]),
-            "fuel_rate": float(status_row["fuel_rate"]),
-            "status_score": float(score),
-            "inspection_result": get_result(score),
-            "issue_message": ", ".join(issues) if issues else "정상",
-            "created_at": status_row["created_at"]
-        }
-
-        inspection_status_detail_list.append(
-            inspection_status_detail
+        df.to_sql(
+            name="inspection_status_detail",
+            con=main_engine,
+            if_exists="append",
+            index=False
         )
 
-df = pd.DataFrame(
-    inspection_status_detail_list
-)
+        print(
+            f"{len(inspection_status_detail_list)}건 최종 저장 완료"
+        )
 
-df.to_sql(
-    name="inspection_status_detail",
-    con=main_engine,
-    if_exists="append",
-    index=False
-)
-
-print(
-    f"inspection_status_detail table 전송 완료"
-)
+    consumer.close()
