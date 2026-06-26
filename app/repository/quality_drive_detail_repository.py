@@ -9,6 +9,7 @@ from app.kafka.topics import (
     QUALITY_INSPECTION_DRIVE_DETAIL
 )
 
+load_dotenv()
 MAIN_DATABASE_URL = (
     os.getenv("MAIN_DATABASE_END")
 )
@@ -66,6 +67,14 @@ try:
     print("구독 토픽", consumer.subscription())
     for msg in consumer:
         row = msg.value
+
+        # 폐기 차량 제외
+        if not row.get("created_at"):
+            print(
+                f"폐기 차량 제외 : {row.get('vehicle_id')}"
+            )
+            continue
+
         print(f"Message : {json.dumps(row, ensure_ascii=False)}")
         vehicle_id = row["vehicle_id"]
         car_code = vehicle_id.split("-")[0]
