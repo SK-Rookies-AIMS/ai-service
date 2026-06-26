@@ -1,7 +1,7 @@
+from kafka.sasl.oauth import AbstractTokenProvider
 from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
 
-
-class MSKTokenProvider:
+class MSKTokenProvider(AbstractTokenProvider):
 
     def token(self):
         token, _ = MSKAuthTokenProvider.generate_auth_token(

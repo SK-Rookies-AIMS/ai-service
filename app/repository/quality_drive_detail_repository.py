@@ -8,7 +8,7 @@ from app.kafka.topics import (
 )
 
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
+    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.rds.amazonaws.com:3306/maindb"
 )
 
 main_engine = create_engine(
@@ -60,21 +60,10 @@ detail_id = 1
 inspection_drive_detail_list = []
 
 try:
-    while True:
-
-        msg = consumer.poll(1.0)
-
-        if msg is None:
-            continue
-
-        if msg.error():
-            print(f"Kafka Error : {msg.error()}")
-            continue
-
-        row = json.loads(
-            msg.value().decode("utf-8")
-        )
-
+    print("Consumer 시작")
+    print("구독 토픽", consumer.subscription())
+    for msg in consumer:
+        row = msg.value
         vehicle_id = row["vehicle_id"]
         car_code = vehicle_id.split("-")[0]
 

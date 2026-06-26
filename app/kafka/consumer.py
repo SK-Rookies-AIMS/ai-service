@@ -1,20 +1,19 @@
 # app/kafka/consumer.py
 
 import json
-
+import ssl
 from kafka import KafkaConsumer
-
 from app.kafka.iam_provider import MSKTokenProvider
-
 
 def create_consumer(topic, group_id):
 
     consumer = KafkaConsumer(
         topic,
+        ssl_context=ssl.create_default_context(),
 
         bootstrap_servers=[
-            "127.0.0.2:9098",
-            "127.0.0.3:9098"
+            "b-1.aimsdevmsk.3g8nqa.c2.kafka.ap-northeast-2.amazonaws.com:9098",
+            "b-2.aimsdevmsk.3g8nqa.c2.kafka.ap-northeast-2.amazonaws.com:9098"
         ],
 
         group_id=group_id,
@@ -29,8 +28,7 @@ def create_consumer(topic, group_id):
 
         sasl_oauth_token_provider=MSKTokenProvider(),
 
-        value_deserializer=lambda x:
-            json.loads(x.decode("utf-8"))
+        value_deserializer=lambda x: json.loads(x.decode("utf-8"))
     )
 
     return consumer
