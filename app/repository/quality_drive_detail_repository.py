@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine
 import pandas as pd
 import json
+from dotenv import load_dotenv
+import os
 
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import (
@@ -8,7 +10,7 @@ from app.kafka.topics import (
 )
 
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
+    os.getenv("MAIN_DATABASE_END")
 )
 
 main_engine = create_engine(
@@ -60,21 +62,11 @@ detail_id = 1
 inspection_drive_detail_list = []
 
 try:
-    while True:
-
-        msg = consumer.poll(1.0)
-
-        if msg is None:
-            continue
-
-        if msg.error():
-            print(f"Kafka Error : {msg.error()}")
-            continue
-
-        row = json.loads(
-            msg.value().decode("utf-8")
-        )
-
+    print("Consumer 시작")
+    print("구독 토픽", consumer.subscription())
+    for msg in consumer:
+        row = msg.value
+        print(f"Message : {json.dumps(row, ensure_ascii=False)}")
         vehicle_id = row["vehicle_id"]
         car_code = vehicle_id.split("-")[0]
 

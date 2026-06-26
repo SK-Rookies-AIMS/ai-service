@@ -1,13 +1,16 @@
 from sqlalchemy import create_engine, text
 import pandas as pd
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import os
 
-SAMPLE_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/sampledb"
+load_dotenv()
+MAIN_DATABASE_URL = (
+    os.getenv("MAIN_DATABASE_END")
 )
 
-MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
+SAMPLE_DATABASE_URL = (
+    os.getenv("SAMPLE_DATABASE_END")
 )
 
 sample_engine = create_engine(

@@ -1,18 +1,15 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 import pandas as pd
-from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import os
 
-SAMPLE_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/sampledb"
+from app.kafka.consumer import create_consumer
+from app.kafka.topics import (
+    QUALITY_INSPECTION_RISK_HISTORY
 )
 
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:K.d?S|46~($$z~.J2W)~W!aMEG)-@127.0.0.1:13306/maindb"
-)
-
-sample_engine = create_engine(
-    SAMPLE_DATABASE_URL,
-    pool_pre_ping=True
+    os.getenv("MAIN_DATABASE_END")
 )
 
 main_engine = create_engine(
@@ -20,212 +17,89 @@ main_engine = create_engine(
     pool_pre_ping=True
 )
 
-def calculate_status_risk(row):
-    score = 100
-
-    if float(row["speed"]) > 120:
-        score -= 20
-
-    if int(row["att"]) > 4000:
-        score -= 20
-
-    if float(row["battery_voltage"]) < 12:
-        score -= 10
-
-    return max(score, 0)
-
-
-def calculate_control_risk(row):
-    score = 100
-
-    if row["collision_warning"] == 1:
-        score -= 40
-
-    if row["lane_departure"] == 1:
-        score -= 20
-
-    if row["traction_control"] == 1:
-        score -= 10
-
-    if row["abs_active"] == 1:
-        score -= 10
-
-    return max(score, 0)
-
-
-def calculate_drive_risk(row):
-    score = 100
-
-    if float(row["throttle_position"]) > 90:
-        score -= 20
-
-    if float(row["brake_pressure"]) > 45:
-        score -= 20
-
-    if abs(float(row["steering_angle"])) > 40:
-        score -= 20
-
-    return max(score, 0)
-
-
-def calculate_dynamics_risk(row):
-    score = 100
-
-    if abs(float(row["yaw_rate"])) > 7:
-        score -= 20
-
-    if abs(float(row["roll"])) > 4:
-        score -= 20
-
-    if abs(float(row["pitch"])) > 4:
-        score -= 20
-
-    return max(score, 0)
-
-
-result = []
-risk_id = 1
-
-stage_plan = [
-    ("DRIVE", 6),
-    ("CONTROL", 5),
-    ("DYNAMICS", 3),
-    ("STATUS", 3)
-]
-
-start_date = datetime.strptime(
-    "2026-06-01 01:00",
-    "%Y-%m-%d %H:%M"
+consumer = create_consumer(
+    topic=QUALITY_INSPECTION_RISK_HISTORY,
+    group_id="ai-risk-history-group"
 )
 
-with sample_engine.connect() as conn:
+inspection_risk_history_list = []
 
-    # 7일
-    for day in range(7):
+try:
 
-        day_start = start_date + timedelta(days=day)
+    print("Consumer 시작")
+    print("구독 토픽 :", consumer.subscription())
 
-        # 하루 생산 차량 100대
-        offset = day * 100
+    for msg in consumer:
 
-        vehicles = conn.execute(
-            text("""
-                SELECT DISTINCT vehicle_id
-                FROM car_status
-                ORDER BY vehicle_id
-                LIMIT 100 OFFSET :offset
-            """),
-            {"offset": offset}
-        ).mappings().all()
+        row = msg.value
 
-        vehicle_ids = [v["vehicle_id"] for v in vehicles]
+        print("=" * 50)
+        print(f"[Kafka 수신 성공]")
+        print(f"Topic : {msg.topic}")
+        print(f"Offset : {msg.offset}")
+        print(f"Message : {row}")
+        print("=" * 50)
 
-        current_time = day_start
+        inspection_risk_history_list.append({
+            "id": row["id"],
+            "inspection_type":
+                row["inspection_type"],
 
-        for stage_name, duration in stage_plan:
+            "inspection_round":
+                row["inspection_round"],
 
-            stage_start = current_time
-            stage_end = current_time + timedelta(hours=duration)
+            "risk_score":
+                row["risk_score"],
 
-            scores = []
+            "start_time":
+                row["start_time"],
 
-            for vehicle_id in vehicle_ids:
+            "end_time":
+                row["end_time"]
+        })
 
-                if stage_name == "DRIVE":
+        if len(
+            inspection_risk_history_list
+        ) >= 20:
 
-                    row = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_drive
-                            WHERE vehicle_id=:vehicle_id
-                            LIMIT 1
-                        """),
-                        {"vehicle_id": vehicle_id}
-                    ).mappings().first()
-
-                    if row:
-                        scores.append(
-                            calculate_drive_risk(row)
-                        )
-
-                elif stage_name == "CONTROL":
-
-                    row = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_control
-                            WHERE vehicle_id=:vehicle_id
-                            LIMIT 1
-                        """),
-                        {"vehicle_id": vehicle_id}
-                    ).mappings().first()
-
-                    if row:
-                        scores.append(
-                            calculate_control_risk(row)
-                        )
-
-                elif stage_name == "DYNAMICS":
-
-                    row = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_dynamics
-                            WHERE vehicle_id=:vehicle_id
-                            LIMIT 1
-                        """),
-                        {"vehicle_id": vehicle_id}
-                    ).mappings().first()
-
-                    if row:
-                        scores.append(
-                            calculate_dynamics_risk(row)
-                        )
-
-                elif stage_name == "STATUS":
-
-                    row = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_status
-                            WHERE vehicle_id=:vehicle_id
-                            LIMIT 1
-                        """),
-                        {"vehicle_id": vehicle_id}
-                    ).mappings().first()
-
-                    if row:
-                        scores.append(
-                            calculate_status_risk(row)
-                        )
-
-            avg_score = (
-                round(sum(scores) / len(scores), 2)
-                if scores else 0
+            df = pd.DataFrame(
+                inspection_risk_history_list
             )
 
-            result.append({
-                "id": risk_id,
-                "inspection_type": stage_name,
-                "inspection_round": day + 1,
-                "risk_score": avg_score,
-                "start_time": stage_start.strftime("%Y-%m-%d %H:%M"),
-                "end_time": stage_end.strftime("%Y-%m-%d %H:%M")
-            })
+            df.to_sql(
+                name="inspection_risk_history",
+                con=main_engine,
+                if_exists="append",
+                index=False
+            )
 
-            risk_id += 1
+            print(
+                f"{len(inspection_risk_history_list)}건 저장 완료"
+            )
 
-            current_time = stage_end
+            inspection_risk_history_list.clear()
 
-df = pd.DataFrame(result)
+except Exception as e:
 
-df.to_sql(
-    name="inspection_risk_history",
-    con=main_engine,
-    if_exists="append",
-    index=False
-)
+    print(f"오류 발생 : {e}")
 
-print(
-    f"inspection_risk_history table 전송 완료"
-)
+finally:
+
+    if inspection_risk_history_list:
+
+        df = pd.DataFrame(
+            inspection_risk_history_list
+        )
+
+        df.to_sql(
+            name="inspection_risk_history",
+            con=main_engine,
+            if_exists="append",
+            index=False
+        )
+
+        print(
+            f"{len(inspection_risk_history_list)}건 최종 저장 완료"
+        )
+
+    consumer.close()
