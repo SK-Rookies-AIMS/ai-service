@@ -1,18 +1,13 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 import pandas as pd
-from datetime import datetime, timedelta
 
-SAMPLE_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@127.0.0.1:13306/sampledb"
+from app.kafka.consumer import create_consumer
+from app.kafka.topics import (
+    QUALITY_INSPECTION_RISK_TREND
 )
 
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@127.0.0.1:13306/maindb"
-)
-
-sample_engine = create_engine(
-    SAMPLE_DATABASE_URL,
-    pool_pre_ping=True
+    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.rds.amazonaws.com:3306/maindb"
 )
 
 main_engine = create_engine(
@@ -20,239 +15,84 @@ main_engine = create_engine(
     pool_pre_ping=True
 )
 
-def calculate_status_risk(row):
-    score = 100
-
-    if float(row["speed"]) > 120:
-        score -= 20
-
-    if int(row["att"]) > 4000:
-        score -= 20
-
-    if float(row["battery_voltage"]) < 12:
-        score -= 10
-
-    return max(score, 0)
-
-
-def calculate_control_risk(row):
-    score = 100
-
-    if row["collision_warning"] == 1:
-        score -= 40
-
-    if row["lane_departure"] == 1:
-        score -= 20
-
-    if row["traction_control"] == 1:
-        score -= 10
-
-    if row["abs_active"] == 1:
-        score -= 10
-
-    return max(score, 0)
-
-
-def calculate_drive_risk(row):
-    score = 100
-
-    if float(row["throttle_position"]) > 90:
-        score -= 20
-
-    if float(row["brake_pressure"]) > 45:
-        score -= 20
-
-    if abs(float(row["steering_angle"])) > 40:
-        score -= 20
-
-    return max(score, 0)
-
-
-def calculate_dynamics_risk(row):
-    score = 100
-
-    if abs(float(row["yaw_rate"])) > 7:
-        score -= 20
-
-    if abs(float(row["roll"])) > 4:
-        score -= 20
-
-    if abs(float(row["pitch"])) > 4:
-        score -= 20
-
-    return max(score, 0)
-
-
-# =========================
-# 등급 분류
-# =========================
-
-def get_risk_level(score):
-
-    if score >= 80:
-        return "LOW"
-
-    elif score >= 50:
-        return "MEDIUM"
-
-    return "HIGH"
-
-
-# =========================
-# DB
-# =========================
-
-result = []
-risk_id = 1
-
-base_date = datetime.strptime(
-    "2026-06-01",
-    "%Y-%m-%d"
+consumer = create_consumer(
+    topic=QUALITY_INSPECTION_RISK_TREND,
+    group_id="ai-risk-trend-group"
 )
 
-with sample_engine.connect() as conn:
+inspection_risk_trend_list = []
 
-    for day in range(7):
+try:
 
-        current_date = base_date + timedelta(days=day)
+    print("Consumer 시작")
+    print("구독 토픽 :", consumer.subscription())
 
-        offset = day * 100
+    for msg in consumer:
 
-        vehicles = conn.execute(
-            text("""
-                SELECT DISTINCT vehicle_id
-                FROM car_status
-                ORDER BY vehicle_id
-                LIMIT 100 OFFSET :offset
-            """),
-            {"offset": offset}
-        ).mappings().all()
+        row = msg.value
 
-        vehicle_ids = [
-            v["vehicle_id"]
-            for v in vehicles
-        ]
+        print("=" * 50)
+        print("[Kafka 메시지 수신]")
+        print(row)
+        print("=" * 50)
 
-        low_count = 0
-        medium_count = 0
-        high_count = 0
+        inspection_risk_trend_list.append({
+            "id": row["id"],
+            "risk_level":
+                row["risk_level"],
 
-        # =====================
-        # 차량 100대
-        # =====================
+            "risk_count":
+                row["risk_count"],
 
-        for vehicle_id in vehicle_ids:
+            "risk_ratio":
+                row["risk_ratio"],
 
-            scores = []
+            "created_at":
+                row["created_at"]
+        })
 
-            status = conn.execute(
-                text("""
-                    SELECT *
-                    FROM car_status
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
-                """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
+        if len(
+            inspection_risk_trend_list
+        ) >= 20:
 
-            if status:
-                scores.append(
-                    calculate_status_risk(status)
-                )
+            df = pd.DataFrame(
+                inspection_risk_trend_list
+            )
 
-            control = conn.execute(
-                text("""
-                    SELECT *
-                    FROM car_control
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
-                """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
+            df.to_sql(
+                name="inspection_risk_trend",
+                con=main_engine,
+                if_exists="append",
+                index=False
+            )
 
-            if control:
-                scores.append(
-                    calculate_control_risk(control)
-                )
+            print(
+                f"{len(inspection_risk_trend_list)}건 저장 완료"
+            )
 
-            drive = conn.execute(
-                text("""
-                    SELECT *
-                    FROM car_drive
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
-                """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
+            inspection_risk_trend_list.clear()
 
-            if drive:
-                scores.append(
-                    calculate_drive_risk(drive)
-                )
+except Exception as e:
 
-            dynamics = conn.execute(
-                text("""
-                    SELECT *
-                    FROM car_dynamics
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
-                """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
+    print(f"오류 발생 : {e}")
 
-            if dynamics:
-                scores.append(
-                    calculate_dynamics_risk(dynamics)
-                )
+finally:
 
-            if not scores:
-                continue
+    if inspection_risk_trend_list:
 
-            avg_score = sum(scores) / len(scores)
+        df = pd.DataFrame(
+            inspection_risk_trend_list
+        )
 
-            level = get_risk_level(avg_score)
+        df.to_sql(
+            name="inspection_risk_trend",
+            con=main_engine,
+            if_exists="append",
+            index=False
+        )
 
-            if level == "LOW":
-                low_count += 1
+        print(
+            f"{len(inspection_risk_trend_list)}건 최종 저장 완료"
+        )
 
-            elif level == "MEDIUM":
-                medium_count += 1
-
-            else:
-                high_count += 1
-
-        # =====================
-        # 저장
-        # =====================
-
-        daily_result = [
-            ("LOW", low_count),
-            ("MEDIUM", medium_count),
-            ("HIGH", high_count)
-        ]
-
-        for level, count in daily_result:
-
-            result.append({
-                "id": risk_id,
-                "risk_level": level,
-                "risk_count": count,
-                "risk_ratio": round(count, 2),
-                "created_at": current_date.strftime(
-                    "%Y-%m-%d 00:00:00"
-                )
-            })
-
-            risk_id += 1
-            
-df = pd.DataFrame(result)
-df.to_sql(
-    name="inspection_risk_trend",
-    con=main_engine,
-    if_exists="append",
-    index=False
-)
-
-print(
-    f"inspection_risk_trend table 전송 완료"
-)
+    consumer.close()
