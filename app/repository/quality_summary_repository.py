@@ -3,14 +3,26 @@ import pandas as pd
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
+from urllib.parse import quote_plus
 
 load_dotenv()
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = quote_plus(
+    os.getenv("DB_PASSWORD")
+)
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
+SAMPLE_DB_NAME = os.getenv("SAMPLE_DB_NAME")
+
 MAIN_DATABASE_URL = (
-    os.getenv("MAIN_DATABASE_END")
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
 )
 
 SAMPLE_DATABASE_URL = (
-    os.getenv("SAMPLE_DATABASE_END")
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
 )
 
 sample_engine = create_engine(

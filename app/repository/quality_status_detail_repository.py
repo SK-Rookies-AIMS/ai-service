@@ -1,13 +1,26 @@
 from sqlalchemy import create_engine
 import pandas as pd
+from dotenv import load_dotenv
+import os
+from urllib.parse import quote_plus
 
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import (
     QUALITY_INSPECTION_STATUS_DETAIL
 )
 
+load_dotenv()
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = quote_plus(
+    os.getenv("DB_PASSWORD")
+)
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
+
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.rds.amazonaws.com:3306/maindb"
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
 )
 
 main_engine = create_engine(

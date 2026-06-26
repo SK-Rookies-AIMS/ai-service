@@ -3,6 +3,7 @@ import pandas as pd
 import json
 from dotenv import load_dotenv
 import os
+from urllib.parse import quote_plus
 
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import (
@@ -10,16 +11,22 @@ from app.kafka.topics import (
 )
 
 load_dotenv()
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = quote_plus(
+    os.getenv("DB_PASSWORD")
+)
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
+
 MAIN_DATABASE_URL = (
-    os.getenv("MAIN_DATABASE_END")
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
 )
 
 main_engine = create_engine(
     MAIN_DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=3600,
-    pool_size=5,
-    max_overflow=10
+    pool_pre_ping=True
 )
 
 consumer = create_consumer(
