@@ -1,12 +1,4 @@
 # kafka/config.py
-
-BOOTSTRAP_SERVERS = [
-
-    "127.0.0.2:9092",
-
-    "127.0.0.3:9092"
-]
-
 AUTO_OFFSET_RESET = "earliest"
 
 ENABLE_AUTO_COMMIT = False

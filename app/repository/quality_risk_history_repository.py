@@ -1,5 +1,7 @@
 from sqlalchemy import create_engine
 import pandas as pd
+from dotenv import load_dotenv
+import os
 
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import (
@@ -7,7 +9,7 @@ from app.kafka.topics import (
 )
 
 MAIN_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.rds.amazonaws.com:3306/maindb"
+    os.getenv("MAIN_DATABASE_END")
 )
 
 main_engine = create_engine(

@@ -4,7 +4,10 @@ import json
 import ssl
 from kafka import KafkaConsumer
 from app.kafka.iam_provider import MSKTokenProvider
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 def create_consumer(topic, group_id):
 
     consumer = KafkaConsumer(
@@ -12,8 +15,8 @@ def create_consumer(topic, group_id):
         ssl_context=ssl.create_default_context(),
 
         bootstrap_servers=[
-            "b-1.aimsdevmsk.3g8nqa.c2.kafka.ap-northeast-2.amazonaws.com:9098",
-            "b-2.aimsdevmsk.3g8nqa.c2.kafka.ap-northeast-2.amazonaws.com:9098"
+        os.getenv("BROKER_URL_1"),
+        os.getenv("BROKER_URL_2")
         ],
 
         group_id=group_id,

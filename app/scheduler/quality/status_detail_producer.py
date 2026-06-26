@@ -1,13 +1,16 @@
 from sqlalchemy import create_engine, text
 from kafka import KafkaProducer
+from dotenv import load_dotenv
+import os
 
 import json
 import time
 
 from app.kafka.iam_provider import MSKTokenProvider
 
+load_dotenv()
 SAMPLE_DATABASE_URL = (
-    "mysql+pymysql://admin:j8XKJ9?vbR>v5Mysc0_5zk-zMDnO@aims-dev-mysql.c7yyi6w0ch43.ap-northeast-2.rds.amazonaws.com:3306/sampledb"
+    os.getenv("SAMPLE_DATABASE_END")
 )
 
 sample_engine = create_engine(
@@ -17,8 +20,8 @@ sample_engine = create_engine(
 
 producer = KafkaProducer(
     bootstrap_servers=[
-        "b-1.aimsdevmsk.3g8nqa.c2.kafka.ap-northeast-2.amazonaws.com:9098",
-        "b-2.aimsdevmsk.3g8nqa.c2.kafka.ap-northeast-2.amazonaws.com:9098"
+        os.getenv("BROKER_URL_1"),
+        os.getenv("BROKER_URL_2")
     ],
 
     security_protocol="SASL_SSL",
