@@ -33,6 +33,24 @@ RAW_EVENT_COLUMNS = [
     "defect_reason",
     "dataset_split",
 ]
+TRANSFER_PREDICTION_COLUMNS = [
+    "car_master_id",
+    "source_event_id",
+    "target_event_id",
+    "source_process_code",
+    "target_process_code",
+    "source_defect_yn",
+    "target_defect_yn",
+    "source_cycle_time_sec",
+    "source_station_delay_sec",
+    "source_queue_length",
+    "source_wip_count",
+    "source_current_rms_ampere",
+    "source_vibration_score",
+    "source_thermal_score",
+    "source_event_json",
+    "dataset_split",
+]
 DEFAULT_DATASET_ROOT = Path(__file__).resolve().parents[1] / "ml" / "datasets" / "process"
 DEFAULT_OUTPUT_DIRNAME = "generated"
 
@@ -131,9 +149,8 @@ def generate_defect_transfer_datasets(
     _write_csv(defect_train_path, [r for r in event_rows if r["dataset_split"] == "train"], RAW_EVENT_COLUMNS)
     _write_csv(defect_test_path, [r for r in event_rows if r["dataset_split"] == "test"], RAW_EVENT_COLUMNS)
 
-    transition_columns = list(transition_rows[0]) if transition_rows else []
-    _write_csv(transfer_train_path, [r for r in transition_rows if r["dataset_split"] == "train"], transition_columns)
-    _write_csv(transfer_test_path, [r for r in transition_rows if r["dataset_split"] == "test"], transition_columns)
+    _write_csv(transfer_train_path, [r for r in transition_rows if r["dataset_split"] == "train"], TRANSFER_PREDICTION_COLUMNS)
+    _write_csv(transfer_test_path, [r for r in transition_rows if r["dataset_split"] == "test"], TRANSFER_PREDICTION_COLUMNS)
 
     metadata = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -150,6 +167,10 @@ def generate_defect_transfer_datasets(
             "defect_test": str(defect_test_path),
             "transfer_train": str(transfer_train_path),
             "transfer_test": str(transfer_test_path),
+        },
+        "transfer_prediction_schema": {
+            "label_column": "target_defect_yn",
+            "excluded_target_side_columns": ["target_defect_reason", "target_event_json"],
         },
         "source_files": source.source_files,
     }
@@ -402,7 +423,6 @@ def _build_transition_rows(event_by_car_process: dict[tuple[int, str], dict[str,
             source = event_by_car_process[(car_master_id, source_process)]
             target = event_by_car_process[(car_master_id, target_process)]
             source_payload = json.loads(source["event_json"])
-            target_payload = json.loads(target["event_json"])
             source_metrics = source_payload["processMetrics"]
             source_sensor = source_payload["sensor"]
             row = {
@@ -413,7 +433,6 @@ def _build_transition_rows(event_by_car_process: dict[tuple[int, str], dict[str,
                 "target_process_code": target_process,
                 "source_defect_yn": int(source["defect_yn"]),
                 "target_defect_yn": int(target["defect_yn"]),
-                "target_defect_reason": target["defect_reason"],
                 "source_cycle_time_sec": source_metrics["cycleTimeSec"],
                 "source_station_delay_sec": source_metrics["stationDelaySec"],
                 "source_queue_length": source_metrics["queueLength"],
@@ -422,7 +441,6 @@ def _build_transition_rows(event_by_car_process: dict[tuple[int, str], dict[str,
                 "source_vibration_score": source_sensor["vibration"]["vibrationScore"],
                 "source_thermal_score": source_sensor["thermal"]["thermalScore"],
                 "source_event_json": source["event_json"],
-                "target_event_json": target["event_json"],
                 "dataset_split": split,
             }
             rows.append(row)
@@ -430,10 +448,10 @@ def _build_transition_rows(event_by_car_process: dict[tuple[int, str], dict[str,
 
 
 def _defect_profile(car_master_id: int) -> dict[str, bool]:
-    press = _stable_int(car_master_id, "PRESS") % 100 < 9
-    body = (_stable_int(car_master_id, "BODY") % 100 < 7) or (press and _stable_int(car_master_id, "PRESS_BODY") % 100 < 55)
-    paint = (_stable_int(car_master_id, "PAINT") % 100 < 8) or (body and _stable_int(car_master_id, "BODY_PAINT") % 100 < 48)
-    assembly = (_stable_int(car_master_id, "ASSEMBLY") % 100 < 6) or (paint and _stable_int(car_master_id, "PAINT_ASSEMBLY") % 100 < 45)
+    press = _stable_int(car_master_id, "PRESS") % 100 < 18
+    body = (_stable_int(car_master_id, "BODY") % 100 < 17) or (press and _stable_int(car_master_id, "PRESS_BODY") % 100 < 30)
+    paint = (_stable_int(car_master_id, "PAINT") % 100 < 17) or (body and _stable_int(car_master_id, "BODY_PAINT") % 100 < 28)
+    assembly = (_stable_int(car_master_id, "ASSEMBLY") % 100 < 16) or (paint and _stable_int(car_master_id, "PAINT_ASSEMBLY") % 100 < 25)
     return {"PRESS": press, "BODY": body, "PAINT": paint, "ASSEMBLY": assembly}
 
 
@@ -449,44 +467,52 @@ def _apply_defect_profile(
     r1 = _stable_float(car_master_id, process_code, "defect_rand_1")
     r2 = _stable_float(car_master_id, process_code, "defect_rand_2")
     r3 = _stable_float(car_master_id, process_code, "defect_rand_3")
+    severity = 0.20 + _stable_float(car_master_id, process_code, "defect_severity") * 0.65
+
+    current_factor = 0.92 + r2 * 0.20
+    current["rmsAmpere"] = round(float(current["rmsAmpere"]) * current_factor, 9)
+    current["maxAmpere"] = round(float(current["maxAmpere"]) * current_factor, 9)
+    current["minAmpere"] = round(float(current["minAmpere"]) * current_factor, 9)
+    ford["vibrationScore"] = round(float(ford["vibrationScore"]) * (0.82 + r3 * 0.34), 6)
+    vision["defectScore"] = round(float(vision["defectScore"]) * (0.82 + r1 * 0.34), 6)
 
     if is_defect:
-        current["rmsAmpere"] = round(3.0 + r1 * 1.5, 9)
-        current["maxAmpere"] = round(current["rmsAmpere"] + 0.2 + r2 * 0.2, 9)
-        current["minAmpere"] = round(max(0.0, current["rmsAmpere"] - 0.2 - r3 * 0.2), 9)
-        current["accelerationG"] = round(0.04 + r1 * 0.06, 9)
-        ford["label"] = -1
-        ford["vibrationScore"] = round(0.55 + r1 * 0.30, 6)
-        ford["vibrationRms"] = round(1.2 + r2 * 1.5, 9)
-        ford["vibrationPeak"] = round(2.0 + r3 * 2.0, 9)
-        vision["label"] = 1
-        vision["thermalStdTemp"] = round(3.5 + r1 * 3.5, 9)
-        vision["defectScore"] = round(0.50 + r2 * 0.30, 6)
-        vision["surfaceQualityScore"] = round(65.0 + r3 * 15.0, 3)
-        bosch["response"] = 1
+        if process_code == "PRESS":
+            current_base = _to_float(current.get("rmsAmpere"), 1.8)
+            current["rmsAmpere"] = round(current_base + 0.10 + severity * 0.45 + r1 * 0.28, 9)
+            current["maxAmpere"] = round(current["rmsAmpere"] + 0.10 + r2 * 0.24, 9)
+            current["minAmpere"] = round(max(0.0, current["rmsAmpere"] - 0.12 - r3 * 0.24), 9)
+            current["accelerationG"] = round(0.008 + severity * 0.018 + r1 * 0.018, 9)
+        elif process_code == "BODY":
+            ford["label"] = -1
+            ford["vibrationScore"] = round(max(float(ford["vibrationScore"]), 0.20 + severity * 0.28 + r1 * 0.16), 6)
+            ford["vibrationRms"] = round(max(float(ford["vibrationRms"]) * (0.88 + r2 * 0.30), 0.52 + severity * 0.68 + r2 * 0.62), 9)
+            ford["vibrationPeak"] = round(max(float(ford["vibrationPeak"]) * (0.88 + r3 * 0.30), 0.90 + severity * 0.88 + r3 * 0.82), 9)
+        elif process_code == "PAINT":
+            vision["label"] = 1
+            vision["thermalStdTemp"] = round(max(float(vision["thermalStdTemp"]) * (0.88 + r1 * 0.24), 1.4 + severity * 1.6 + r1 * 1.25), 9)
+            vision["defectScore"] = round(max(float(vision["defectScore"]), 0.18 + severity * 0.22 + r2 * 0.18), 6)
+            vision["surfaceQualityScore"] = round(78.0 - severity * 8.0 + r3 * 14.0, 3)
+        else:
+            bosch["response"] = 1 if severity + r3 * 0.40 > 0.82 else 0
+            if r2 < 0.35:
+                current["rmsAmpere"] = round(float(current["rmsAmpere"]) + 0.10 + r1 * 0.35, 9)
+                current["maxAmpere"] = round(current["rmsAmpere"] + 0.14 + r2 * 0.22, 9)
     else:
-        if r1 < 0.03:
-            current["rmsAmpere"] = round(2.8 + r2 * 0.8, 9)
-            current["maxAmpere"] = round(current["rmsAmpere"] + 0.2, 9)
-            current["minAmpere"] = round(max(0.0, current["rmsAmpere"] - 0.2), 9)
-        else:
-            current["rmsAmpere"] = round(float(current["rmsAmpere"]) * (0.9 + r2 * 0.2), 9)
-            current["maxAmpere"] = round(float(current["maxAmpere"]) * (0.9 + r2 * 0.2), 9)
-            current["minAmpere"] = round(float(current["minAmpere"]) * (0.9 + r2 * 0.2), 9)
-            
-        if r2 < 0.03:
-            ford["vibrationScore"] = round(0.45 + r3 * 0.20, 6)
-            ford["vibrationRms"] = round(1.0 + r1 * 0.8, 9)
-        else:
-            ford["vibrationScore"] = round(float(ford["vibrationScore"]) * (0.8 + r3 * 0.4), 6)
-            
-        if r3 < 0.03:
-            vision["defectScore"] = round(0.40 + r1 * 0.20, 6)
-            vision["surfaceQualityScore"] = round(75.0 + r2 * 10.0, 3)
-        else:
-            vision["defectScore"] = round(float(vision["defectScore"]) * (0.8 + r1 * 0.4), 6)
-            
-        bosch["response"] = 0
+        if process_code == "PRESS" and r1 < 0.34:
+            current["rmsAmpere"] = round(1.85 + r2 * 1.80, 9)
+            current["maxAmpere"] = round(current["rmsAmpere"] + 0.18 + r3 * 0.20, 9)
+            current["minAmpere"] = round(max(0.0, current["rmsAmpere"] - 0.18 - r1 * 0.20), 9)
+        if process_code == "BODY" and r2 < 0.34:
+            ford["vibrationScore"] = round(0.22 + r3 * 0.46, 6)
+            ford["vibrationRms"] = round(0.58 + r1 * 1.35, 9)
+            ford["vibrationPeak"] = round(0.95 + r2 * 1.55, 9)
+        if process_code == "PAINT" and r3 < 0.34:
+            vision["thermalStdTemp"] = round(1.25 + r1 * 2.45, 9)
+            vision["defectScore"] = round(0.18 + r1 * 0.46, 6)
+            vision["surfaceQualityScore"] = round(66.0 + r2 * 22.0, 3)
+        if process_code == "ASSEMBLY":
+            bosch["response"] = 1 if r1 < 0.18 else 0
 
 
 def _process_metrics(process_code: str, index: int, current: dict[str, Any], ford: dict[str, Any], vision: dict[str, Any], bosch: dict[str, Any], is_defect: bool) -> dict[str, Any]:
@@ -498,8 +524,11 @@ def _process_metrics(process_code: str, index: int, current: dict[str, Any], for
         anomaly = float(vision["defectScore"]) * 8
     else:
         anomaly = float(bosch["response"]) * 8
+    delay_rand = _stable_float(index, process_code, "delay_rand")
     if is_defect:
-        anomaly += 8.0
+        anomaly += 0.2 + delay_rand * 1.2
+    elif delay_rand < 0.28:
+        anomaly += 0.8 + _stable_float(index, process_code, "normal_delay") * 4.2
     cycle_time = target + anomaly + (index % 5) * 0.4
     processing = max(1.0, cycle_time - (5 + index % 4))
     waiting = cycle_time - processing + (index % 3)

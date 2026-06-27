@@ -29,7 +29,7 @@ def main() -> None:
     args = _parse_args()
 
     if not settings.sample_database_connection_url:
-        raise SystemExit("SAMPLE_DATABASE_URL 설정이 필요합니다.")
+        raise SystemExit("MAIN_DATABASE_URL + SAMPLE_DB_NAME 설정이 필요합니다.")
 
     repository = SampleDbRepository(settings.sample_database_connection_url)
     service = ManufacturingEventJsonService(repository)

@@ -25,7 +25,7 @@ def start_manufacturing_event_scheduler(app: FastAPI) -> None:
         return
     if not settings.sample_database_connection_url:
         logger.info(
-            "SAMPLE_DATABASE_URL이 없어 제조 이벤트 스케줄러를 시작하지 않습니다.",
+            "MAIN_DATABASE_URL + SAMPLE_DB_NAME이 없어 제조 이벤트 스케줄러를 시작하지 않습니다.",
         )
         return
 

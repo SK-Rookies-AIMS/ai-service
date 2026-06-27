@@ -12,7 +12,7 @@ from app.utils.datetime_utils import seoul_now_iso
 from app.utils.json_utils import from_json, to_json
 
 
-DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck_iforest_model.pkl")
+DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
 
 
 class BottleneckAnalysisService:
