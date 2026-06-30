@@ -16,7 +16,7 @@ from app.utils.json_utils import from_json, to_json
 
 
 DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
-BOTTLENECK_CACHE_VERSION = "v6"
+BOTTLENECK_CACHE_VERSION = "v8"
 PROCESS_CODE_LABELS = {
     "PRESS": "프레스",
     "BODY": "차체",
@@ -67,9 +67,10 @@ class BottleneckAnalysisService:
         # 저장소에서 요청 페이지 범위만 조회
         rows = self.repository.list_results(cursor=page, size=size)
         if saved_count == 0 or not rows:
-            raise AppException(
-                "병목 분석 결과를 찾을 수 없습니다.",
-                status_code=status.HTTP_404_NOT_FOUND,
+            return BottleneckAnalysisPage(
+                content=[],
+                hasNext=False,
+                nextCursor=None,
             )
 
         next_cursor = page + 1 if has_next else None
@@ -141,10 +142,15 @@ class BottleneckAnalysisService:
         """전체 공정 이력을 분석하고 요청한 순위 페이지 결과만 저장"""
         histories = self.repository.list_manufacturing_event_histories()
         if not histories:
-            raise AppException(
-                "공정 이력 데이터를 찾을 수 없습니다.",
-                status_code=status.HTTP_404_NOT_FOUND,
+            logger.info(
+                "Bottleneck analysis skipped: source=kafka_raw_db "
+                "table=manufacturing_event_json filter=is_sent:true total=0 "
+                "cursor=%s size=%s",
+                cursor,
+                size,
             )
+            self.repository.prune_results_after_rank(0)
+            return 0, False
 
         process_counts = Counter(str(row.get("process_code")) for row in histories)
         event_ids = [
@@ -202,6 +208,63 @@ class BottleneckAnalysisService:
             has_next,
         )
         return len(page_summaries), has_next
+
+    def refresh_results_from_events(self) -> list[dict[str, Any]]:
+        """Kafka raw 이벤트 수신 후 전체 병목 분석 결과를 즉시 갱신한다."""
+        histories = self.repository.list_manufacturing_event_histories()
+        if not histories:
+            logger.info(
+                "Bottleneck analysis skipped: source=kafka_raw_db "
+                "table=manufacturing_event_json filter=is_sent:true total=0 "
+                "trigger=kafka_raw_event",
+            )
+            self.repository.prune_results_after_rank(0)
+            return []
+
+        process_counts = Counter(str(row.get("process_code")) for row in histories)
+        event_ids = [
+            int(row["manufacturing_event_id"])
+            for row in histories
+            if row.get("manufacturing_event_id") is not None
+        ]
+        delay_times = [
+            float(row.get("delay_time") or 0.0)
+            for row in histories
+        ]
+        logger.info(
+            "Bottleneck analysis input loaded: source=kafka_raw_db "
+            "table=manufacturing_event_json filter=is_sent:true total=%s "
+            "process_counts=%s delay_time_range=%.3f..%.3f "
+            "manufacturing_event_id_range=%s..%s trigger=kafka_raw_event",
+            len(histories),
+            dict(sorted(process_counts.items())),
+            min(delay_times) if delay_times else 0.0,
+            max(delay_times) if delay_times else 0.0,
+            min(event_ids) if event_ids else None,
+            max(event_ids) if event_ids else None,
+        )
+
+        if not self.model_path.exists():
+            raise AppException(
+                f"병목 탐지 모델을 찾을 수 없습니다: {self.model_path}",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        summaries = self.detector.summarize_manufacturing_event_histories(histories)
+        self.repository.replace_results(
+            summaries,
+            detected_at=seoul_now().replace(tzinfo=None),
+            start_rank=1,
+            end_rank=max(len(summaries), 1),
+        )
+        self.repository.prune_results_after_rank(len(summaries))
+        logger.info(
+            "Bottleneck analysis results saved: source=kafka_raw_db "
+            "trigger=kafka_raw_event result_count=%s rank_range=1..%s",
+            len(summaries),
+            len(summaries),
+        )
+        return summaries
 
     def _redis(self) -> Any:
         """병목 캐시 작업에 사용할 Redis 클라이언트를 생성하고 재사용"""

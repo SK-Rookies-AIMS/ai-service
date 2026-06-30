@@ -5,14 +5,17 @@ import json
 import logging
 import ssl
 from datetime import datetime
-from threading import Event
+from threading import Event, Lock
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI
 
 from app.core.config import settings
 from app.kafka.iam_provider import MSKTokenProvider
 from app.repository.sampledb_repository import SampleDbRepository
+from app.service.analysis.bottleneck_service import BottleneckAnalysisService
+from app.utils.datetime_utils import seoul_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -20,9 +23,11 @@ PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
 
 # assembly-service의 app.kafka.topics.raw.name과 동일한 실제 raw 토픽명.
 RAW_TOPIC = "factory.manufacturing.raw"
+ANALYSIS_TOPIC = "factory.manufacturing.analysis"
 RAW_CONSUMER_GROUP_ID = "ai-consumer-group"
 RAW_AUTO_OFFSET_RESET = "earliest"
 RAW_CONSUMER_CONCURRENCY = 2
+_bottleneck_analysis_lock = Lock()
 
 
 def start_raw_event_consumer(app: FastAPI) -> None:
@@ -69,7 +74,7 @@ def _run_raw_event_consumer(
     consumer_index: int,
 ) -> None:
     try:
-        from kafka import KafkaConsumer
+        from kafka import KafkaConsumer, KafkaProducer
     except ModuleNotFoundError:
         logger.exception("kafka-python is required to consume manufacturing raw events.")
         return
@@ -89,6 +94,11 @@ def _run_raw_event_consumer(
     )
     repository = SampleDbRepository(settings.sample_database_connection_url)
     repository.schema.ensure_schema()
+    analysis_service = _create_bottleneck_analysis_service()
+    analysis_producer = _create_analysis_producer(
+        KafkaProducer,
+        bootstrap_servers,
+    )
 
     logger.info(
         "Raw Kafka consumer started: topic=%s group=%s concurrency=%s/%s bootstrap=%s auth=SASL_SSL/OAUTHBEARER",
@@ -104,7 +114,12 @@ def _run_raw_event_consumer(
                 if stop_event.is_set():
                     break
                 try:
-                    _consume_record(repository, record)
+                    _consume_record(
+                        repository,
+                        analysis_service,
+                        analysis_producer,
+                        record,
+                    )
                 except Exception:
                     logger.exception(
                         "Failed to consume raw event: topic=%s partition=%s offset=%s",
@@ -118,6 +133,8 @@ def _run_raw_event_consumer(
     except Exception:
         logger.exception("Raw Kafka consumer failed.")
     finally:
+        if analysis_producer is not None:
+            analysis_producer.close(timeout=5)
         consumer.close()
         logger.info(
             "Raw Kafka consumer stopped: topic=%s group=%s concurrency=%s/%s",
@@ -128,7 +145,12 @@ def _run_raw_event_consumer(
         )
 
 
-def _consume_record(repository: SampleDbRepository, record: Any) -> None:
+def _consume_record(
+    repository: SampleDbRepository,
+    analysis_service: BottleneckAnalysisService | None,
+    analysis_producer: Any | None,
+    record: Any,
+) -> None:
     """Kafka raw 메시지를 manufacturing_event_json row로 변환해 sampledb에 upsert한다."""
     raw_event = _parse_raw_event(record)
     row = _raw_event_to_row(raw_event)
@@ -136,12 +158,24 @@ def _consume_record(repository: SampleDbRepository, record: Any) -> None:
         [row],
         update_existing=True,
     )
-    # 새 raw 이벤트가 들어오면 다음 병목 API 호출에서 재분석하도록 Redis 캐시를 비운다.
+    bottleneck_summaries = _refresh_bottleneck_analysis(
+        analysis_service,
+        record,
+        row,
+    )
+    analysis_published = _publish_bottleneck_analysis_event(
+        analysis_producer,
+        raw_event,
+        row,
+        bottleneck_summaries,
+    )
+    # 새 raw 이벤트와 자동 분석 결과가 반영되면 Redis 캐시를 비운다.
     _clear_bottleneck_cache()
     logger.info(
         "Kafka raw event consumed and stored: topic=%s partition=%s offset=%s "
         "key=%s event_id=%s manufacturing_event_id_source=manufacturing_event_json.id "
-        "car_master_id=%s process_code=%s affected_rows=%s",
+        "car_master_id=%s process_code=%s affected_rows=%s "
+        "bottleneck_result_count=%s analysis_topic_published=%s",
         record.topic,
         record.partition,
         record.offset,
@@ -150,6 +184,8 @@ def _consume_record(repository: SampleDbRepository, record: Any) -> None:
         row["car_master_id"],
         row["process_code"],
         affected_rows,
+        len(bottleneck_summaries),
+        analysis_published,
     )
 
 
@@ -284,6 +320,418 @@ def _bootstrap_servers() -> list[str]:
     """환경변수 BROKER_URL_1/2에서 MSK bootstrap 서버 목록을 만든다."""
     servers = [settings.broker_url_1 or "", settings.broker_url_2 or ""]
     return [server.strip() for server in servers if server.strip()]
+
+
+def _create_bottleneck_analysis_service() -> BottleneckAnalysisService | None:
+    try:
+        return BottleneckAnalysisService()
+    except Exception:
+        logger.exception(
+            "Bottleneck analysis service is unavailable. "
+            "Raw Kafka events will still be stored.",
+        )
+        return None
+
+
+def _create_analysis_producer(
+    producer_cls: Any,
+    bootstrap_servers: list[str],
+) -> Any | None:
+    try:
+        producer = producer_cls(
+            ssl_context=ssl.create_default_context(),
+            bootstrap_servers=bootstrap_servers,
+            security_protocol="SASL_SSL",
+            sasl_mechanism="OAUTHBEARER",
+            sasl_oauth_token_provider=MSKTokenProvider(),
+            key_serializer=lambda value: str(value).encode("utf-8"),
+            value_serializer=lambda value: json.dumps(
+                value,
+                ensure_ascii=False,
+                default=_json_default,
+            ).encode("utf-8"),
+            retries=3,
+            linger_ms=10,
+        )
+    except Exception:
+        logger.exception(
+            "Kafka analysis producer is unavailable. "
+            "Bottleneck results will still be stored in DB.",
+        )
+        return None
+
+    logger.info(
+        "Kafka analysis producer started: topic=%s bootstrap=%s auth=SASL_SSL/OAUTHBEARER",
+        ANALYSIS_TOPIC,
+        bootstrap_servers,
+    )
+    return producer
+
+
+def _refresh_bottleneck_analysis(
+    analysis_service: BottleneckAnalysisService | None,
+    record: Any,
+    row: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if analysis_service is None:
+        return []
+
+    with _bottleneck_analysis_lock:
+        try:
+            summaries = analysis_service.refresh_results_from_events()
+        except Exception:
+            logger.exception(
+                "Failed to refresh bottleneck analysis after raw event: "
+                "topic=%s partition=%s offset=%s event_id=%s process_code=%s",
+                record.topic,
+                record.partition,
+                record.offset,
+                row.get("event_id"),
+                row.get("process_code"),
+            )
+            return []
+
+    logger.info(
+        "Bottleneck analysis refreshed after raw Kafka event: "
+        "topic=%s partition=%s offset=%s event_id=%s process_code=%s result_count=%s",
+        record.topic,
+        record.partition,
+        record.offset,
+        row.get("event_id"),
+        row.get("process_code"),
+        len(summaries),
+    )
+    return summaries
+
+
+def _publish_bottleneck_analysis_event(
+    producer: Any | None,
+    raw_event: dict[str, Any],
+    row: dict[str, Any],
+    summaries: list[dict[str, Any]],
+) -> bool:
+    if producer is None:
+        return False
+
+    event = _build_bottleneck_analysis_event(raw_event, row, summaries)
+    key = str(row["car_master_id"])
+    try:
+        result = producer.send(ANALYSIS_TOPIC, key=key, value=event).get(timeout=10)
+    except Exception:
+        logger.exception(
+            "Failed to publish bottleneck analysis event: topic=%s key=%s event_id=%s",
+            ANALYSIS_TOPIC,
+            key,
+            row.get("event_id"),
+        )
+        return False
+
+    logger.info(
+        "Bottleneck analysis event published: topic=%s partition=%s offset=%s "
+        "key=%s event_id=%s analysis_id=%s analysis_type=%s",
+        result.topic,
+        result.partition,
+        result.offset,
+        key,
+        row.get("event_id"),
+        event["analysisId"],
+        event["analysisType"],
+    )
+    return True
+
+
+def _build_bottleneck_analysis_event(
+    raw_event: dict[str, Any],
+    row: dict[str, Any],
+    summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    event_json = row["event_json"]
+    equipment = event_json.get("equipment", {})
+    product = event_json.get("product", {})
+    metrics = event_json.get("processMetrics", {})
+    equipment_status = event_json.get("equipmentStatus", {})
+    equipment_code = str(
+        equipment.get("equipmentCode")
+        or row.get("equipment_id")
+        or "UNKNOWN",
+    )
+    process_code = str(row["process_code"])
+    summary = _matching_bottleneck_summary(
+        summaries,
+        process_code=process_code,
+        equipment_code=equipment_code,
+    )
+    raw_delay_time = _safe_float(
+        metrics.get("stationDelaySec"),
+        default=_safe_float(metrics.get("waitingTimeSec"), default=0.0),
+    )
+    bottleneck_delay_time = _safe_float(
+        summary.get("avg_delay_time") if summary else None,
+        default=raw_delay_time,
+    )
+    risk_score = _safe_float(
+        summary.get("risk_score") if summary else None,
+        default=0.0,
+    )
+    overall_risk_score = _risk_score_to_percent(risk_score)
+    risk_level = _risk_level(overall_risk_score)
+    is_bottleneck = summary is not None and risk_score >= 3
+    defect_probability = _defect_probability(event_json, process_code)
+    transfer_predicted_process = _transfer_predicted_process(
+        process_code,
+        defect_probability,
+    )
+    is_quality_defect = defect_probability >= 0.6
+    is_equipment_fault = str(
+        equipment_status.get("operationStatus") or "",
+    ).upper() in {"FAULT", "STOPPED", "ERROR", "DOWN"}
+    is_sequence_error = (
+        process_code == "ASSEMBLY"
+        and _safe_float(
+            _nested_value(event_json, "processData", "assembly", "sequenceErrorCount"),
+            default=0.0,
+        )
+        > 0
+    )
+
+    return {
+        "analysisId": f"ANL-{uuid4()}",
+        "eventId": row["event_id"],
+        "eventTime": _iso_or_none(row.get("event_time"))
+        or _nested_text(event_json, "event", "eventTime"),
+        "analyzedAt": seoul_now_iso(),
+        "factoryCode": _nested_text(event_json, "location", "factoryCode"),
+        "lineCode": _nested_text(event_json, "location", "lineCode"),
+        "processCode": process_code,
+        "equipmentId": row.get("equipment_id"),
+        "equipmentCode": equipment_code,
+        "equipmentName": equipment.get("equipmentName"),
+        "equipmentType": equipment.get("equipmentType"),
+        "productId": product.get("productId"),
+        "carId": raw_event.get("_kafka_key") or product.get("carId") or row["car_master_id"],
+        "carMasterId": row["car_master_id"],
+        "analysisType": "BOTTLENECK_ANALYSIS",
+        "sourceService": "AI_SERVICE",
+        "riskScore": risk_score,
+        "riskScoreScale": "1-5",
+        "riskScores": {
+            "overallRiskScore": overall_risk_score,
+            "bottleneckRiskScore": overall_risk_score,
+            "defectTransferRiskScore": round(defect_probability * 100.0, 1),
+            "equipmentRiskScore": None,
+            "processRisk": {
+                "pressRiskScore": overall_risk_score if process_code == "PRESS" else None,
+                "bodyRiskScore": overall_risk_score if process_code == "BODY" else None,
+                "paintRiskScore": overall_risk_score if process_code == "PAINT" else None,
+                "assemblyRiskScore": (
+                    overall_risk_score if process_code == "ASSEMBLY" else None
+                ),
+            },
+        },
+        "operationRate": _operation_rate(metrics),
+        "riskLevel": risk_level,
+        "analysisResult": {
+            "isAbnormal": (
+                is_bottleneck
+                or is_quality_defect
+                or is_equipment_fault
+                or is_sequence_error
+            ),
+            "isBottleneck": is_bottleneck,
+            "isQualityDefect": is_quality_defect,
+            "isEquipmentFault": is_equipment_fault,
+            "isSequenceError": is_sequence_error,
+        },
+        "reason": {
+            "mainReason": _bottleneck_reason(
+                risk_score=risk_score,
+                delay_time=bottleneck_delay_time,
+                is_equipment_fault=is_equipment_fault,
+                is_sequence_error=is_sequence_error,
+            ),
+            "detailReasons": [
+                f"processCode={process_code}",
+                f"equipmentCode={equipment_code}",
+                f"bottleneckDelayTime={round(bottleneck_delay_time, 3)}",
+                f"riskScore={risk_score}",
+            ],
+        },
+        "recommendation": {
+            "type": _recommendation_type(process_code),
+            "message": _recommendation_message(process_code),
+        },
+        "manufacturingAnalysisData": {
+            "originalEventId": row["event_id"],
+            "carMasterId": row["car_master_id"],
+            "equipmentId": row.get("equipment_id"),
+            "processCode": process_code,
+            "analysisData": {
+                "cycleTimeSec": metrics.get("cycleTimeSec"),
+                "waitingTimeSec": metrics.get("waitingTimeSec"),
+                "processingTimeSec": metrics.get("processingTimeSec"),
+                "stationDelaySec": metrics.get("stationDelaySec"),
+                "queueLength": metrics.get("queueLength"),
+                "wipCount": metrics.get("wipCount"),
+            },
+            "riskScore": risk_score,
+        },
+        "aiAnalysisData": {
+            "originalEventId": row["event_id"],
+            "carMasterId": row["car_master_id"],
+            "equipmentId": row.get("equipment_id"),
+            "processCode": process_code,
+            "bottleneckDelayTime": bottleneck_delay_time,
+            "defectProbability": defect_probability,
+            "transferPredictedProcess": transfer_predicted_process,
+            "riskScore": risk_score,
+        },
+    }
+
+
+def _matching_bottleneck_summary(
+    summaries: list[dict[str, Any]],
+    *,
+    process_code: str,
+    equipment_code: str,
+) -> dict[str, Any] | None:
+    for summary in summaries:
+        if (
+            str(summary.get("process_code")) == process_code
+            and str(summary.get("equipment_code")) == equipment_code
+        ):
+            return summary
+    return None
+
+
+def _risk_score_to_percent(risk_score: float) -> float:
+    return round(max(0.0, min(risk_score, 5.0)) * 20.0, 1)
+
+
+def _risk_level(score: float) -> str:
+    if score >= 80:
+        return "CRITICAL"
+    if score >= 60:
+        return "WARNING"
+    return "LOW"
+
+
+def _operation_rate(metrics: dict[str, Any]) -> float:
+    cycle_time = _safe_float(metrics.get("cycleTimeSec"), default=0.0)
+    processing_time = _safe_float(metrics.get("processingTimeSec"), default=0.0)
+    idle_time = _safe_float(metrics.get("equipmentIdleTimeSec"), default=0.0)
+    planned_time = cycle_time if cycle_time > 0 else processing_time + idle_time
+    if planned_time <= 0:
+        return 0.0
+    return round(max(0.0, min(processing_time / planned_time * 100.0, 100.0)), 1)
+
+
+def _defect_probability(event_json: dict[str, Any], process_code: str) -> float:
+    process_data = event_json.get("processData", {})
+    sensor = event_json.get("sensor", {})
+    vibration = sensor.get("vibration", {})
+    robot = sensor.get("robotArmVibration", {})
+    thermal = sensor.get("thermal", {})
+
+    if process_code == "PAINT":
+        paint = process_data.get("paint", {})
+        defect_score = _safe_float(paint.get("defectScore"), default=0.0)
+        if str(paint.get("visionLabel") or "").upper() == "DEFECT":
+            defect_score = max(defect_score, 0.75)
+        surface_quality = _safe_float(
+            paint.get("surfaceQualityScore"),
+            default=100.0,
+        )
+        return round(max(defect_score, max(0.0, 100.0 - surface_quality) / 100.0), 4)
+
+    if process_code == "ASSEMBLY":
+        assembly = process_data.get("assembly", {})
+        error_count = (
+            _safe_float(assembly.get("sequenceErrorCount"), default=0.0)
+            + _safe_float(assembly.get("missingPartCount"), default=0.0)
+            + _safe_float(assembly.get("fasteningErrorCount"), default=0.0)
+        )
+        return round(min(error_count / 3.0, 1.0), 4)
+
+    vibration_score = max(
+        _safe_float(vibration.get("vibrationScore"), default=0.0),
+        _safe_float(robot.get("vibrationScore"), default=0.0),
+    )
+    thermal_score = max(
+        _safe_float(thermal.get("thermalScore"), default=0.0) / 100.0,
+        _safe_float(thermal.get("maxTemperature"), default=0.0) / 100.0,
+    )
+    return round(min(max(vibration_score, thermal_score), 1.0), 4)
+
+
+def _transfer_predicted_process(
+    process_code: str,
+    defect_probability: float,
+) -> str | None:
+    if defect_probability < 0.5:
+        return None
+    return {
+        "PRESS": "BODY",
+        "BODY": "PAINT",
+        "PAINT": "ASSEMBLY",
+        "ASSEMBLY": None,
+    }.get(process_code)
+
+
+def _bottleneck_reason(
+    *,
+    risk_score: float,
+    delay_time: float,
+    is_equipment_fault: bool,
+    is_sequence_error: bool,
+) -> str:
+    if is_equipment_fault:
+        return "설비 상태값에서 고장 또는 정지 위험이 감지되었습니다."
+    if is_sequence_error:
+        return "의장 공정의 작업 순서 오류가 감지되었습니다."
+    if risk_score >= 3:
+        return "Rule Engine과 Isolation Forest 기준 병목 위험이 감지되었습니다."
+    if delay_time > 0:
+        return "공정 지연 시간이 감지되었지만 위험도는 낮습니다."
+    return "주요 병목 지표가 정상 범위입니다."
+
+
+def _recommendation_type(process_code: str) -> str:
+    return {
+        "PRESS": "CHECK_PRESS_EQUIPMENT_AND_QUEUE",
+        "BODY": "CHECK_ROBOT_VIBRATION",
+        "PAINT": "CHECK_PAINT_QUALITY",
+        "ASSEMBLY": "CHECK_ASSEMBLY_SEQUENCE",
+    }.get(process_code, "CHECK_PROCESS")
+
+
+def _recommendation_message(process_code: str) -> str:
+    return {
+        "PRESS": "프레스 설비 상태, 전류 RMS 값과 대기열을 확인하세요.",
+        "BODY": "로봇 암 진동과 충돌 위험을 확인하세요.",
+        "PAINT": "열화상, 도막 두께와 비전 불량 결과를 확인하세요.",
+        "ASSEMBLY": "작업 순서, 누락 부품과 체결 오류를 확인하세요.",
+    }.get(process_code, "공정 지표와 설비 상태를 확인하세요.")
+
+
+def _safe_float(value: Any, *, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) if value is not None else None
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 def _clear_bottleneck_cache() -> None:

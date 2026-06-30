@@ -178,9 +178,11 @@ class BottleneckDetector:
             .agg(
                 manufacturing_event_id=("manufacturing_event_id", "first"),
                 car_master_id=("car_master_id", "first"),
-                avg_delay_time=("max_station_span", "mean"),
+                avg_delay_time=("delay_time", "mean"),
+                max_delay_time=("delay_time", "max"),
                 avg_total_duration=("total_duration", "mean"),
                 affected_vehicle_count=("car_master_id", "nunique"),
+                equipment_abnormal_count=("is_equipment_abnormal", "sum"),
                 event_count=("id", "count"),
                 avg_rule_risk=("rule_risk_score", "mean"),
                 avg_iforest_risk=("iforest_risk_score", "mean"),
@@ -203,14 +205,16 @@ class BottleneckDetector:
         )
         grouped = grouped.sort_values(
             [
-                "affected_vehicle_count",
                 "risk_level",
+                "equipment_abnormal_count",
                 "max_risk_score",
+                "max_delay_time",
                 "avg_iforest_risk",
                 "avg_rule_risk",
+                "affected_vehicle_count",
                 "avg_delay_time",
             ],
-            ascending=[False, False, False, False, False, False],
+            ascending=[False, False, False, False, False, False, False, False],
         ).reset_index(drop=True)
 
         # DB 저장 형식 변환
@@ -237,6 +241,7 @@ class BottleneckDetector:
         result = features.copy()
         duration_threshold = result["total_duration"].quantile(0.95)
         station_span_threshold = result["max_station_span"].quantile(0.95)
+        delay_threshold = result["delay_time"].quantile(0.95)
 
         duration_score = (
             result["total_duration"] / max(float(duration_threshold), 1e-12)
@@ -244,14 +249,31 @@ class BottleneckDetector:
         station_span_score = (
             result["max_station_span"] / max(float(station_span_threshold), 1e-12)
         ).clip(upper=2.0) / 2.0
+        if float(delay_threshold) > 0:
+            delay_score = (
+                result["delay_time"] / float(delay_threshold)
+            ).clip(upper=2.0) / 2.0
+            delay_condition = result["delay_time"].ge(delay_threshold)
+        else:
+            delay_score = result["delay_time"] * 0.0
+            delay_condition = result["delay_time"].gt(0)
+        equipment_status_score = result["is_equipment_abnormal"].astype(float)
 
-        result["rule_risk_score"] = (
-            0.55 * duration_score
-            + 0.45 * station_span_score
+        weighted_rule_score = (
+            0.35 * duration_score
+            + 0.25 * station_span_score
+            + 0.25 * delay_score
+            + 0.15 * equipment_status_score
         ).fillna(0.0)
+        result["rule_risk_score"] = pd.concat(
+            [weighted_rule_score, equipment_status_score],
+            axis=1,
+        ).max(axis=1)
         result["rule_bottleneck"] = (
             result["total_duration"].ge(duration_threshold)
             | result["max_station_span"].ge(station_span_threshold)
+            | delay_condition
+            | result["is_equipment_abnormal"].eq(1)
         ).astype(int)
         return result
 
@@ -263,13 +285,25 @@ class BottleneckDetector:
         source_df = pd.DataFrame(histories)
         process_time = source_df["process_time"].fillna(0).astype(float)
         waiting_time = source_df["waiting_time"].fillna(0).astype(float)
-        delay_time = source_df.get("delay_time", waiting_time).fillna(0).astype(float)
+        if "delay_time" in source_df.columns:
+            delay_time = source_df["delay_time"].where(source_df["delay_time"] > 0, waiting_time)
+        else:
+            delay_time = waiting_time
+        delay_time = delay_time.fillna(0).astype(float)
         queue_length = source_df.get("queue_length", 0.0)
         wip_count = source_df.get("wip_count", 0.0)
         station_key = source_df.get(
             "station_key",
             source_df["equipment_code"],
         ).fillna("UNKNOWN")
+        equipment_status = (
+            source_df["equipment_status"]
+            if "equipment_status" in source_df
+            else pd.Series("", index=source_df.index)
+        ).fillna("").astype(str).str.upper()
+        is_equipment_abnormal = equipment_status.isin(
+            {"FAULT", "STOPPED", "ERROR", "DOWN"},
+        ).astype(int)
         total_duration = process_time + waiting_time
 
         # 기본 시간/식별자 피처
@@ -281,6 +315,8 @@ class BottleneckDetector:
                 "car_master_id": source_df["car_master_id"],
                 "process_code": source_df["process_code"].astype(str),
                 "equipment_code": source_df["equipment_code"].astype(str),
+                "equipment_status": equipment_status,
+                "is_equipment_abnormal": is_equipment_abnormal,
                 "station_key": station_key.astype(str),
                 "process_time": process_time,
                 "waiting_time": waiting_time,
