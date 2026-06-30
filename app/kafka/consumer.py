@@ -7,35 +7,31 @@ from app.kafka.iam_provider import MSKTokenProvider
 from dotenv import load_dotenv
 import os
 
-def run():
-    load_dotenv()
-    def create_consumer(topic, group_id):
+load_dotenv()
+def create_consumer(topic, group_id):
 
-        consumer = KafkaConsumer(
-            topic,
-            ssl_context=ssl.create_default_context(),
+    consumer = KafkaConsumer(
+        topic,
+        ssl_context=ssl.create_default_context(),
 
-            bootstrap_servers=[
-            os.getenv("BROKER_URL_1"),
-            os.getenv("BROKER_URL_2")
-            ],
+        bootstrap_servers=[
+        os.getenv("BROKER_URL_1"),
+        os.getenv("BROKER_URL_2")
+        ],
 
-            group_id=group_id,
+        group_id=group_id,
 
-            auto_offset_reset="earliest",
+        auto_offset_reset="earliest",
 
-            enable_auto_commit=True,
+        enable_auto_commit=True,
 
-            security_protocol="SASL_SSL",
+        security_protocol="SASL_SSL",
 
-            sasl_mechanism="OAUTHBEARER",
+        sasl_mechanism="OAUTHBEARER",
 
-            sasl_oauth_token_provider=MSKTokenProvider(),
+        sasl_oauth_token_provider=MSKTokenProvider(),
 
-            value_deserializer=lambda x: json.loads(x.decode("utf-8"))
-        )
+        value_deserializer=lambda x: json.loads(x.decode("utf-8"))
+    )
 
-        return consumer
-
-if __name__ == "__main__":
-    run()
+    return consumer
