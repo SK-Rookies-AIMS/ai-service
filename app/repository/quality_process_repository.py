@@ -42,6 +42,10 @@ def run():
 
             row = msg.value
 
+            if "process_name" not in row:
+                print("구버전 메시지 무시")
+                continue
+
             process_name = row["process_name"]
             completed_count = row["completed_count"]
             waiting_count = row["waiting_count"]
