@@ -42,7 +42,7 @@ def run():
             row = msg.value
 
             inspection_risk_history_list.append({
-                "id": row["id"],
+                #"id": row["id"],
                 "inspection_type":
                     row["inspection_type"],
 

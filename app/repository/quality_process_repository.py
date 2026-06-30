@@ -80,7 +80,7 @@ def run():
                     process_status = "WAIT"
 
                 inspection_process_list.append({
-                    "id": process_id,
+                    #"id": process_id,
                     "process_name": process_name,
                     "total_vehicle_count": total_vehicle_count,
                     "completed_count": completed_count,

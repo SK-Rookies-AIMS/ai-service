@@ -100,7 +100,7 @@ def run():
                 issue_message = "ACCEL_ALERT"
 
             inspection_drive_detail_list.append({
-                "id": detail_id,
+                #"id": detail_id,
                 "car_code": car_code,
                 "inspection_no": inspection_no,
                 "vehicle_id": vehicle_id,

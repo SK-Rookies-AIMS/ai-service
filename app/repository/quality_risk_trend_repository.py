@@ -42,7 +42,7 @@ def run():
             row = msg.value
 
             inspection_risk_trend_list.append({
-                "id": row["id"],
+                #"id": row["id"],
                 "risk_level":
                     row["risk_level"],
 
