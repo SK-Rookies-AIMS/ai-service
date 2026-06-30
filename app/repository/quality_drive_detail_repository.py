@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import pandas as pd
 from dotenv import load_dotenv
 import os
@@ -88,13 +88,15 @@ def run():
             # 중복 저장 방지
             # ==========================
             exists = pd.read_sql(
-                """
-                SELECT COUNT(*) AS cnt
-                FROM inspection_drive_detail
-                WHERE vehicle_id=:vehicle_id
-                """,
+                text("""
+                    SELECT COUNT(*) AS cnt
+                    FROM inspection_drive_detail
+                    WHERE vehicle_id = :vehicle_id
+                """),
                 con=main_engine,
-                params={"vehicle_id": vehicle_id}
+                params={
+                    "vehicle_id": vehicle_id
+                }
             )
 
             if exists.iloc[0]["cnt"] > 0:

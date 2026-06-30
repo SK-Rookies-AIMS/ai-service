@@ -51,12 +51,12 @@ def run():
 
             # 같은 날짜 + 같은 검사 타입 존재 여부 확인
             exists = pd.read_sql(
-                """
-                SELECT COUNT(*) AS cnt
-                FROM inspection_risk_history
-                WHERE inspection_type=:inspection_type
-                AND DATE(start_time)=DATE(:start_time)
-                """,
+                text("""
+                    SELECT COUNT(*) AS cnt
+                    FROM inspection_risk_history
+                    WHERE inspection_type = :inspection_type
+                    AND DATE(start_time) = DATE(:start_time)
+                """),
                 con=main_engine,
                 params={
                     "inspection_type": row["inspection_type"],

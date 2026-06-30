@@ -43,12 +43,12 @@ def run():
             row = msg.value
 
             exists = pd.read_sql(
-                """
-                SELECT COUNT(*) AS cnt
-                FROM inspection_risk_trend
-                WHERE risk_level=:risk_level
-                AND DATE(created_at)=DATE(:created_at)
-                """,
+                text("""
+                    SELECT COUNT(*) AS cnt
+                    FROM inspection_risk_trend
+                    WHERE risk_level = :risk_level
+                    AND DATE(created_at) = DATE(:created_at)
+                """),
                 con=main_engine,
                 params={
                     "risk_level": row["risk_level"],
