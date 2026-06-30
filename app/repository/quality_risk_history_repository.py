@@ -54,14 +54,14 @@ def run():
                 """
                 SELECT COUNT(*) AS cnt
                 FROM inspection_risk_history
-                WHERE inspection_type=%s
-                AND DATE(start_time)=DATE(%s)
+                WHERE inspection_type=:inspection_type
+                AND DATE(start_time)=DATE(:start_time)
                 """,
                 con=main_engine,
-                params=[
-                    inspection_type,
-                    start_time
-                ]
+                params={
+                    "inspection_type": row["inspection_type"],
+                    "start_time": row["start_time"]
+                }
             )
 
             # 존재하면 UPDATE

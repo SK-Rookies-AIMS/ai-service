@@ -57,7 +57,10 @@ def run():
 
             new_cars = conn.execute(
                 text("""
-                    SELECT id, vehicle_id
+                    SELECT
+                        id,
+                        vehicle_id,
+                        created_at
                     FROM inspection_master
                     WHERE id > :last_id
                     ORDER BY id
@@ -65,21 +68,16 @@ def run():
                 {"last_id": last_id}
             ).mappings().all()
 
-            total_count = conn.execute(
-                text("""
-                    SELECT COUNT(*)
-                    FROM inspection_master
-                """)
-            ).scalar()
-
         if not new_cars:
             time.sleep(1)
             continue
 
         for car in new_cars:
 
-            # 생산 완료 시 모든 공정 완료
-            if total_count >= TOTAL_TARGET:
+            current_count = car["id"]
+
+            # 생산이 모두 끝난 경우
+            if current_count >= TOTAL_TARGET:
 
                 process_list = [
                     ("VISUAL", TOTAL_TARGET),
@@ -88,19 +86,18 @@ def run():
                     ("FINAL", TOTAL_TARGET)
                 ]
 
-            # 평상시 공정 지연 효과 적용
             else:
 
                 process_list = [
                     (
                         "VISUAL",
-                        min(total_count, TOTAL_TARGET)
+                        min(current_count, TOTAL_TARGET)
                     ),
 
                     (
                         "FUNCTION",
                         min(
-                            max(total_count - 1, 0),
+                            max(current_count - 1, 0),
                             TOTAL_TARGET
                         )
                     ),
@@ -108,7 +105,7 @@ def run():
                     (
                         "DRIVE",
                         min(
-                            max(total_count - 2, 0),
+                            max(current_count - 2, 0),
                             TOTAL_TARGET
                         )
                     ),
@@ -116,7 +113,7 @@ def run():
                     (
                         "FINAL",
                         min(
-                            max(total_count - 3, 0),
+                            max(current_count - 3, 0),
                             TOTAL_TARGET
                         )
                     )
@@ -129,24 +126,21 @@ def run():
                     TOTAL_TARGET - completed
                 )
 
-                rate = round(
+                progress_rate = round(
                     completed / TOTAL_TARGET * 100,
                     2
                 )
 
-                if rate == 100:
-                    status = "COMPLETE"
+                if progress_rate >= 100:
+                    process_status = "COMPLETE"
 
-                elif rate == 0:
-                    status = "WAIT"
+                elif progress_rate == 0:
+                    process_status = "WAIT"
 
                 else:
-                    status = "RUNNING"
+                    process_status = "RUNNING"
 
                 message = {
-                    "vehicle_id":
-                        car["vehicle_id"],
-
                     "process_name":
                         process_name,
 
@@ -160,15 +154,13 @@ def run():
                         waiting,
 
                     "progress_rate":
-                        rate,
+                        progress_rate,
 
                     "process_status":
-                        status,
+                        process_status,
 
                     "created_at":
-                        time.strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
+                        car["created_at"]
                 }
 
                 producer.send(
@@ -179,8 +171,8 @@ def run():
                 print(
                     f"[{process_name}] "
                     f"{completed}/{TOTAL_TARGET} "
-                    f"({rate}%) "
-                    f"[{status}]"
+                    f"({progress_rate}%) "
+                    f"[{process_status}]"
                 )
 
             producer.flush()
@@ -188,8 +180,6 @@ def run():
             last_id = car["id"]
 
         time.sleep(1)
-
-    producer.close()
 
 
 if __name__ == "__main__":

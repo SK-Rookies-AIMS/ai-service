@@ -6,7 +6,7 @@ from urllib.parse import quote_plus
 
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import QUALITY_INSPECTION_PROCESS
-from app.kafka.options import (PROCESS_GROUP)
+from app.kafka.options import PROCESS_GROUP
 
 
 def run():

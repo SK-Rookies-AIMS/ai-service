@@ -91,10 +91,10 @@ def run():
                 """
                 SELECT COUNT(*) AS cnt
                 FROM inspection_drive_detail
-                WHERE vehicle_id = %s
+                WHERE vehicle_id=:vehicle_id
                 """,
                 con=main_engine,
-                params=[vehicle_id]
+                params={"vehicle_id": vehicle_id}
             )
 
             if exists.iloc[0]["cnt"] > 0:

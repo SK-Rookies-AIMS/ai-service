@@ -46,14 +46,14 @@ def run():
                 """
                 SELECT COUNT(*) AS cnt
                 FROM inspection_risk_trend
-                WHERE risk_level=%s
-                AND DATE(created_at)=DATE(%s)
+                WHERE risk_level=:risk_level
+                AND DATE(created_at)=DATE(:created_at)
                 """,
                 con=main_engine,
-                params=[
-                    row["risk_level"],
-                    row["created_at"]
-                ]
+                params={
+                    "risk_level": row["risk_level"],
+                    "created_at": row["created_at"]
+                }
             )
 
             if exists.iloc[0]["cnt"] > 0:
