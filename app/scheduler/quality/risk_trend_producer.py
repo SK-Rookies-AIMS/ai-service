@@ -1,275 +1,302 @@
 from sqlalchemy import create_engine, text
 from kafka import KafkaProducer
 from dotenv import load_dotenv
+from urllib.parse import quote_plus
+
 import os
-
-from datetime import datetime, timedelta
-
 import json
 import time
 
 from app.kafka.iam_provider import MSKTokenProvider
 
-load_dotenv()
-SAMPLE_DATABASE_URL = (
-    os.getenv("SAMPLE_DATABASE_END")
-)
 
-sample_engine = create_engine(
-    SAMPLE_DATABASE_URL,
-    pool_pre_ping=True
-)
+def run():
 
-producer = KafkaProducer(
-    bootstrap_servers=[
-        os.getenv("BROKER_URL_1"),
-        os.getenv("BROKER_URL_2")
-    ],
+    load_dotenv()
 
-    security_protocol="SASL_SSL",
+    DB_USER = os.getenv("DB_USER")
+    DB_PASSWORD = quote_plus(
+        os.getenv("DB_PASSWORD")
+    )
+    DB_HOST = os.getenv("DB_HOST")
+    DB_PORT = os.getenv("DB_PORT")
 
-    sasl_mechanism="OAUTHBEARER",
+    SAMPLE_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/sampledb"
+    )
 
-    sasl_oauth_token_provider=MSKTokenProvider(),
+    MAIN_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/maindb"
+    )
 
-    value_serializer=lambda x:
-        json.dumps(x, default=str).encode("utf-8")
-)
+    sample_engine = create_engine(
+        SAMPLE_DATABASE_URL,
+        pool_pre_ping=True
+    )
 
+    main_engine = create_engine(
+        MAIN_DATABASE_URL,
+        pool_pre_ping=True
+    )
 
-def calculate_status_risk(row):
-    score = 100
+    producer = KafkaProducer(
+        bootstrap_servers=[
+            os.getenv("BROKER_URL_1"),
+            os.getenv("BROKER_URL_2")
+        ],
 
-    if float(row["speed"]) > 120:
-        score -= 20
+        security_protocol="SASL_SSL",
 
-    if int(row["att"]) > 4000:
-        score -= 20
+        sasl_mechanism="OAUTHBEARER",
 
-    if float(row["battery_voltage"]) < 12:
-        score -= 10
+        sasl_oauth_token_provider=MSKTokenProvider(),
 
-    return max(score, 0)
+        value_serializer=lambda x:
+            json.dumps(x, default=str).encode("utf-8")
+    )
 
+    def calculate_status_risk(row):
 
-def calculate_control_risk(row):
-    score = 100
+        score = 100
 
-    if row["collision_warning"] == 1:
-        score -= 40
+        if float(row["speed"]) > 120:
+            score -= 20
 
-    if row["lane_departure"] == 1:
-        score -= 20
+        if int(row["att"]) > 4000:
+            score -= 20
 
-    if row["traction_control"] == 1:
-        score -= 10
+        if float(row["battery_voltage"]) < 12:
+            score -= 10
 
-    if row["abs_active"] == 1:
-        score -= 10
+        return max(score, 0)
 
-    return max(score, 0)
+    def calculate_control_risk(row):
 
+        score = 100
 
-def calculate_drive_risk(row):
-    score = 100
+        if row["collision_warning"] == 1:
+            score -= 40
 
-    if float(row["throttle_position"]) > 90:
-        score -= 20
+        if row["lane_departure"] == 1:
+            score -= 20
 
-    if float(row["brake_pressure"]) > 45:
-        score -= 20
+        if row["traction_control"] == 1:
+            score -= 10
 
-    if abs(float(row["steering_angle"])) > 40:
-        score -= 20
+        if row["abs_active"] == 1:
+            score -= 10
 
-    return max(score, 0)
+        return max(score, 0)
 
+    def calculate_drive_risk(row):
 
-def calculate_dynamics_risk(row):
-    score = 100
+        score = 100
 
-    if abs(float(row["yaw_rate"])) > 7:
-        score -= 20
+        if float(row["throttle_position"]) > 90:
+            score -= 20
 
-    if abs(float(row["roll"])) > 4:
-        score -= 20
+        if float(row["brake_pressure"]) > 45:
+            score -= 20
 
-    if abs(float(row["pitch"])) > 4:
-        score -= 20
+        if abs(float(row["steering_angle"])) > 40:
+            score -= 20
 
-    return max(score, 0)
+        return max(score, 0)
 
+    def calculate_dynamics_risk(row):
 
-def get_risk_level(score):
+        score = 100
 
-    if score >= 80:
-        return "LOW"
+        if abs(float(row["yaw_rate"])) > 7:
+            score -= 20
 
-    elif score >= 50:
-        return "MEDIUM"
+        if abs(float(row["roll"])) > 4:
+            score -= 20
 
-    return "HIGH"
+        if abs(float(row["pitch"])) > 4:
+            score -= 20
 
+        return max(score, 0)
 
-risk_id = 1
+    def get_risk_level(score):
 
-base_date = datetime.strptime(
-    "2026-06-01",
-    "%Y-%m-%d"
-)
+        if score >= 80:
+            return "LOW"
 
-with sample_engine.connect() as conn:
+        elif score >= 50:
+            return "MEDIUM"
 
-    for day in range(7):
+        return "HIGH"
 
-        current_date = (
-            base_date +
-            timedelta(days=day)
-        )
+    last_id = 0
 
-        offset = day * 100
+    while True:
 
-        vehicles = conn.execute(
-            text("""
-                SELECT DISTINCT vehicle_id
-                FROM car_status
-                ORDER BY vehicle_id
-                LIMIT 100 OFFSET :offset
-            """),
-            {"offset": offset}
-        ).mappings().all()
+        with main_engine.connect() as conn:
 
-        vehicle_ids = [
-            v["vehicle_id"]
-            for v in vehicles
-        ]
-
-        low_count = 0
-        medium_count = 0
-        high_count = 0
-
-        for vehicle_id in vehicle_ids:
-
-            scores = []
-
-            status = conn.execute(
+            cars = conn.execute(
                 text("""
                     SELECT *
-                    FROM car_status
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
+                    FROM inspection_master
+                    WHERE id > :last_id
+                    ORDER BY id
                 """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
+                {"last_id": last_id}
+            ).mappings().all()
 
-            if status:
-                scores.append(
-                    calculate_status_risk(status)
-                )
+        if not cars:
+            time.sleep(1)
+            continue
 
-            control = conn.execute(
-                text("""
-                    SELECT *
-                    FROM car_control
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
-                """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
+        for car in cars:
 
-            if control:
-                scores.append(
-                    calculate_control_risk(control)
-                )
+            vehicle_id = car["vehicle_id"]
 
-            drive = conn.execute(
-                text("""
-                    SELECT *
-                    FROM car_drive
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
-                """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
-
-            if drive:
-                scores.append(
-                    calculate_drive_risk(drive)
-                )
-
-            dynamics = conn.execute(
-                text("""
-                    SELECT *
-                    FROM car_dynamics
-                    WHERE vehicle_id=:vehicle_id
-                    LIMIT 1
-                """),
-                {"vehicle_id": vehicle_id}
-            ).mappings().first()
-
-            if dynamics:
-                scores.append(
-                    calculate_dynamics_risk(dynamics)
-                )
-
-            if not scores:
-                continue
-
-            avg_score = (
-                sum(scores) / len(scores)
+            created_date = (
+                car["created_at"]
+                .strftime("%Y-%m-%d 00:00:00")
             )
 
-            level = get_risk_level(
-                avg_score
-            )
+            low = 0
+            medium = 0
+            high = 0
 
-            if level == "LOW":
-                low_count += 1
+            with main_engine.connect() as conn:
 
-            elif level == "MEDIUM":
-                medium_count += 1
+                today_cars = conn.execute(
+                    text("""
+                        SELECT vehicle_id
+                        FROM inspection_master
+                        WHERE DATE(created_at)
+                        =
+                        DATE(:created_at)
+                    """),
+                    {
+                        "created_at":
+                            car["created_at"]
+                    }
+                ).mappings().all()
 
-            else:
-                high_count += 1
+            for row in today_cars:
 
-        daily_result = [
-            ("LOW", low_count),
-            ("MEDIUM", medium_count),
-            ("HIGH", high_count)
-        ]
+                vid = row["vehicle_id"]
 
-        for level, count in daily_result:
+                scores = []
 
-            message = {
-                "id": risk_id,
-                "risk_level": level,
-                "risk_count": count,
+                with sample_engine.connect() as conn:
 
-                # 필요하면 ratio 계산 수정
-                "risk_ratio": round(
-                    count / 100 * 100,
-                    2
-                ),
+                    status = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_status
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
 
-                "created_at":
-                    current_date.strftime(
-                        "%Y-%m-%d 00:00:00"
-                    )
-            }
+                    if status:
+                        scores.append(
+                            calculate_status_risk(status)
+                        )
 
-            producer.send(
-                "quality.inspection.risk_trend",
-                value=message
-            )
+                    control = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_control
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
+
+                    if control:
+                        scores.append(
+                            calculate_control_risk(control)
+                        )
+
+                    drive = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_drive
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
+
+                    if drive:
+                        scores.append(
+                            calculate_drive_risk(drive)
+                        )
+
+                    dynamics = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_dynamics
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
+
+                    if dynamics:
+                        scores.append(
+                            calculate_dynamics_risk(dynamics)
+                        )
+
+                if not scores:
+                    continue
+
+                avg_score = (
+                    sum(scores) / len(scores)
+                )
+
+                level = get_risk_level(
+                    avg_score
+                )
+
+                if level == "LOW":
+                    low += 1
+
+                elif level == "MEDIUM":
+                    medium += 1
+
+                else:
+                    high += 1
+
+            total = low + medium + high
+
+            for level, count in [
+                ("LOW", low),
+                ("MEDIUM", medium),
+                ("HIGH", high)
+            ]:
+
+                producer.send(
+                    "quality.inspection.risk_trend",
+                    value={
+                        "risk_level": level,
+
+                        "risk_count": count,
+
+                        "risk_ratio": round(
+                            count / total * 100, 2
+                        ) if total else 0,
+
+                        "created_at":
+                            created_date
+                    }
+                )
+
+            producer.flush()
 
             print(
-                f"Kafka 전송 완료 : {message}"
+                f"[RISK TREND] {created_date}"
             )
 
-            risk_id += 1
+            last_id = car["id"]
 
-            time.sleep(1)
-
-producer.flush()
-
-print("모든 데이터 Kafka 전송 완료")
+        time.sleep(1)
