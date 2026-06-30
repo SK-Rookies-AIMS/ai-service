@@ -4,6 +4,39 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def database_url_with_name(database_url: str, database_name: str | None) -> str:
+    """Return database_url with its database path replaced by database_name."""
+    if not database_name:
+        return database_url
+
+    scheme_separator = "://"
+    scheme_index = database_url.find(scheme_separator)
+    if scheme_index < 0:
+        return database_url
+
+    authority_start = scheme_index + len(scheme_separator)
+    credential_end = database_url.rfind("@")
+    host_start = credential_end + 1 if credential_end >= authority_start else authority_start
+    suffix_candidates = [
+        index
+        for index in (
+            database_url.find("?", host_start),
+            database_url.find("#", host_start),
+        )
+        if index >= 0
+    ]
+    suffix_start = min(suffix_candidates) if suffix_candidates else len(database_url)
+    path_start = database_url.find("/", host_start, suffix_start)
+    prefix_end = path_start if path_start >= 0 else suffix_start
+
+    return (
+        database_url[:prefix_end]
+        + "/"
+        + database_name.strip("/")
+        + database_url[suffix_start:]
+    )
+
+
 class Settings(BaseSettings):
     """환경 변수와 .env 파일에서 애플리케이션 설정을 로드한다."""
 
@@ -19,17 +52,16 @@ class Settings(BaseSettings):
         alias="COLLEAGUE_SKILL_API_URL",
     )
 
-    kafka_bootstrap_servers: str | None = Field(
-        default=None,
-        alias="KAFKA_BOOTSTRAP_SERVERS",
-    )
+    broker_url_1: str | None = Field(default=None, alias="BROKER_URL_1")
+    broker_url_2: str | None = Field(default=None, alias="BROKER_URL_2")
 
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     redis_key_prefix: str = Field(default="aims:ai-service", alias="REDIS_KEY_PREFIX")
-    redis_cache_ttl_seconds: int = Field(default=300, alias="REDIS_CACHE_TTL_SECONDS")
+    redis_cache_ttl_seconds: int = Field(default=60, alias="REDIS_CACHE_TTL_SECONDS")
 
     main_database_url: str | None = Field(default=None, alias="MAIN_DATABASE_URL")
-    sample_database_url: str | None = Field(default=None, alias="SAMPLE_DATABASE_URL")
+    main_db_name: str | None = Field(default=None, alias="MAIN_DB_NAME")
+    sample_db_name: str | None = Field(default=None, alias="SAMPLE_DB_NAME")
     manufacturing_event_scheduler_enabled: bool = Field(
         default=True,
         alias="MANUFACTURING_EVENT_SCHEDULER_ENABLED",
@@ -52,18 +84,23 @@ class Settings(BaseSettings):
     )
 
     @property
-    def bottleneck_database_url(self) -> str:
-        """병목 분석 결과를 저장할 maindb MySQL URL을 반환한다."""
+    def main_database_connection_url(self) -> str:
+        """Return the main DB connection URL."""
         if self.main_database_url:
-            return self.main_database_url
+            return database_url_with_name(self.main_database_url, self.main_db_name)
 
         raise ValueError("maindb MySQL 설정이 필요합니다: MAIN_DATABASE_URL")
 
     @property
+    def bottleneck_database_url(self) -> str:
+        """병목 분석 결과를 저장할 maindb MySQL URL을 반환한다."""
+        return self.main_database_connection_url
+
+    @property
     def sample_database_connection_url(self) -> str | None:
         """sampledb 설정이 있으면 MySQL URL을 반환한다."""
-        if self.sample_database_url:
-            return self.sample_database_url
+        if self.main_database_url and self.sample_db_name:
+            return database_url_with_name(self.main_database_url, self.sample_db_name)
 
         return None
 
@@ -86,6 +123,12 @@ class Settings(BaseSettings):
             if normalized in {"dev", "develop", "development", "debug"}:
                 return True
         return value
+
+    @field_validator("redis_cache_ttl_seconds", mode="before")
+    @classmethod
+    def use_default_redis_cache_ttl(cls, value: object) -> int:
+        """REDIS_CACHE_TTL_SECONDS는 .env보다 코드 기본값을 우선한다."""
+        return 60
 
     model_config = SettingsConfigDict(
         env_file=".env",

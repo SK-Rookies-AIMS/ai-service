@@ -100,7 +100,7 @@ def normalize_event_json(event_json: dict[str, Any]) -> dict[str, Any]:
     return {
         "event": {
             "eventId": event.get("eventId"),
-            "eventTime": None,
+            "eventTime": event.get("eventTime"),
             "eventType": event.get("eventType"),
             "eventName": event.get("eventName"),
         },
@@ -111,8 +111,8 @@ def normalize_event_json(event_json: dict[str, Any]) -> dict[str, Any]:
         },
         "equipmentStatus": {
             "operationStatus": equipment_status.get("operationStatus"),
-            "lastNormalTime": None,
-            "statusChangedTime": None,
+            "lastNormalTime": equipment_status.get("lastNormalTime"),
+            "statusChangedTime": equipment_status.get("statusChangedTime"),
         },
         "product": {
             "carMasterId": product.get("carMasterId"),
@@ -171,32 +171,24 @@ def normalize_event_json(event_json: dict[str, Any]) -> dict[str, Any]:
 
 PROCESS_META: dict[str, dict[str, Any]] = {
     "PRESS": {
-        "lineCode": "PRESS_LINE_01",
-        "stationCode": "PRESS_STATION_01",
         "equipmentType": "HYDRAULIC_PRESS",
         "eventType": "PROCESS_STATUS",
         "eventName": "프레스 공정 통합 관제 이벤트",
         "targetCycleTimeSec": 40.0,
     },
     "BODY": {
-        "lineCode": "BODY_LINE_01",
-        "stationCode": "BODY_STATION_01",
         "equipmentType": "ROBOT_ARM",
         "eventType": "EQUIPMENT_SENSOR",
         "eventName": "차체 공정 로봇 관제 이벤트",
         "targetCycleTimeSec": 52.0,
     },
     "PAINT": {
-        "lineCode": "PAINT_LINE_01",
-        "stationCode": "PAINT_STATION_01",
         "equipmentType": "CAMERA",
         "eventType": "QUALITY_CHECK",
         "eventName": "도장 공정 품질 관제 이벤트",
         "targetCycleTimeSec": 64.0,
     },
     "ASSEMBLY": {
-        "lineCode": "ASSEMBLY_LINE_01",
-        "stationCode": "ASSEMBLY_STATION_01",
         "equipmentType": "CONVEYOR",
         "eventType": "PROCESS_STATUS",
         "eventName": "의장 공정 조립 관제 이벤트",
@@ -383,8 +375,7 @@ class ManufacturingEventJsonBuilder:
             "event": {
                 "eventId": event_id,
                 # 원천 이벤트 생성 시점에는 실제 발생 시각이 확정되지 않았으므로
-                # DB event_time과 동일하게 JSON 내부 eventTime도 NULL로 둔다.
-                "eventTime": None,
+                "eventTime": event_time.isoformat(),
                 "eventType": meta["eventType"],
                 "eventName": meta["eventName"],
             },
@@ -397,8 +388,12 @@ class ManufacturingEventJsonBuilder:
                 # 운전 상태는 정상/이상 프로필 안에서 차량·공정별로 랜덤 생성한다.
                 # 시간 필드는 실제 이벤트 전송 전까지 미확정이므로 NULL로 둔다.
                 "operationStatus": equipment_status["operationStatus"],
-                "lastNormalTime": None,
-                "statusChangedTime": None,
+                "lastNormalTime": (
+                    (event_time - timedelta(seconds=31)).isoformat()
+                    if is_abnormal
+                    else None
+                ),
+                "statusChangedTime": event_time.isoformat() if is_abnormal else None,
             },
             "product": {
                 "carMasterId": car_master_id,

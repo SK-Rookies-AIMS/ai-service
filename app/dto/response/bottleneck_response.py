@@ -6,10 +6,9 @@ class BottleneckAnalysisItem(BaseModel):
 
     rank_no: int = Field(alias="rankNo")
     process_code: str = Field(alias="processCode")
-    station_code: str = Field(alias="stationCode")
-    avg_delay_time: float = Field(alias="avgDelayTime")
+    delay_time: float = Field(alias="delayTime")
     affected_vehicle_count: int = Field(alias="affectedVehicleCount")
-    risk_score: int = Field(alias="riskScore")
+    risk_score: float = Field(alias="riskScore")
 
 
 class BottleneckAnalysisPage(BaseModel):

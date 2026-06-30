@@ -6,6 +6,10 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
+from app.kafka.raw_event_consumer import (
+    start_raw_event_consumer,
+    stop_raw_event_consumer,
+)
 from app.repository.sampledb_repository import initialize_sampledb
 from app.scheduler.manufacturing import (
     start_manufacturing_event_scheduler,
@@ -49,7 +53,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def initialize_sampledb_schema() -> None:
-        """SAMPLE_DATABASE_URL이 설정된 경우 sampledb 엔티티를 생성한다."""
+        """MAIN_DATABASE_URL + SAMPLE_DB_NAME이 설정된 경우 sampledb 엔티티를 생성한다."""
         if not settings.sample_database_connection_url:
             return
 
@@ -66,9 +70,11 @@ def create_app() -> FastAPI:
             except Exception:
                 logger.exception("미완료 제조 이벤트 생성 job 복구에 실패했습니다.")
         start_manufacturing_event_scheduler(app)
+        start_raw_event_consumer(app)
 
     @app.on_event("shutdown")
     async def stop_background_schedulers() -> None:
+        await stop_raw_event_consumer(app)
         await stop_manufacturing_event_scheduler(app)
 
     return app

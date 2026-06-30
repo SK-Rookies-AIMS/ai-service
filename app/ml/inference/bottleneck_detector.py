@@ -63,7 +63,6 @@ class BottleneckDetector:
         analysis_df: pd.DataFrame,
         top_n: int = 20,
         *,
-        product_process_history_id: int | None = None,
         manufacturing_event_id: int | None = None,
         car_master_id: int | None = None,
     ) -> list[dict[str, Any]]:
@@ -113,14 +112,12 @@ class BottleneckDetector:
             risk_level = int(row["risk_level"])
             summaries.append(
                 {
-                    "product_process_history_id": product_process_history_id,
                     "manufacturing_event_id": manufacturing_event_id,
                     "car_master_id": car_master_id,
                     "process_code": station.process_code,
                     "equipment_code": station.equipment_code,
-                    "station_code": station.station,
                     "rank_no": index + 1,
-                    "avg_delay_time": round(avg_delay_time, 1),
+                    "avg_delay_time": avg_delay_time,
                     "affected_vehicle_count": int(row["affected_vehicle_count"]),
                     "risk_score": float(risk_level),
                 },
@@ -128,13 +125,13 @@ class BottleneckDetector:
 
         return summaries
 
-    def summarize_product_process_histories(
+    def summarize_manufacturing_event_histories(
         self,
         histories: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """공정 이력 병목 순위 계산"""
         # 이력 기반 모델 입력 피처 생성
-        features = self._build_product_process_history_features(histories)
+        features = self._build_manufacturing_event_features(histories)
         model_features = self._resolve_model_features(features)
         X = features.reindex(columns=model_features)
 
@@ -144,25 +141,53 @@ class BottleneckDetector:
         features["iforest_bottleneck"] = (pred_raw == -1).astype(int)
         features["iforest_anomaly_score"] = anomaly_scores
         features["iforest_risk_score"] = pd.Series(anomaly_scores).rank(pct=True).to_numpy()
+        features = self._apply_rule_engine(features)
+        features["combined_risk_score"] = (
+            0.45 * features["rule_risk_score"]
+            + 0.55 * features["iforest_risk_score"]
+        )
+        features["bottleneck_candidate"] = (
+            features["rule_bottleneck"].eq(1)
+            | features["iforest_bottleneck"].eq(1)
+        ).astype(int)
 
         # 지점 대표 이력 선정을 위한 정렬
-        ranked_features = features.sort_values(
-            ["iforest_risk_score", "waiting_time", "process_time", "product_process_history_id"],
-            ascending=[False, False, False, True],
+        target_features = features[features["bottleneck_candidate"].eq(1)].copy()
+        if target_features.empty:
+            target_features = features.nlargest(
+                min(len(features), 20),
+                "combined_risk_score",
+            ).copy()
+
+        ranked_features = target_features.sort_values(
+            [
+                "rule_bottleneck",
+                "iforest_bottleneck",
+                "combined_risk_score",
+                "rule_risk_score",
+                "iforest_risk_score",
+                "total_duration",
+                "max_station_span",
+                "id",
+            ],
+            ascending=[False, False, False, False, False, False, False, True],
         )
         # 공정/설비/지점 단위 집계
         grouped = (
-            ranked_features.groupby(["process_code", "equipment_code", "station_code"], dropna=False)
+            ranked_features.groupby(["process_code", "equipment_code"], dropna=False)
             .agg(
-                product_process_history_id=("product_process_history_id", "first"),
                 manufacturing_event_id=("manufacturing_event_id", "first"),
                 car_master_id=("car_master_id", "first"),
-                avg_delay_time=("waiting_time", "mean"),
-                max_delay_time=("waiting_time", "max"),
-                avg_process_time=("process_time", "mean"),
-                affected_vehicle_count=("product_process_history_id", "count"),
-                risk_score=("iforest_risk_score", "mean"),
-                max_risk_score=("iforest_risk_score", "max"),
+                avg_delay_time=("max_station_span", "mean"),
+                avg_total_duration=("total_duration", "mean"),
+                affected_vehicle_count=("car_master_id", "nunique"),
+                event_count=("id", "count"),
+                avg_rule_risk=("rule_risk_score", "mean"),
+                avg_iforest_risk=("iforest_risk_score", "mean"),
+                risk_score=("combined_risk_score", "mean"),
+                max_risk_score=("combined_risk_score", "max"),
+                avg_queue_length=("queue_length", "mean"),
+                avg_wip_count=("wip_count", "mean"),
             )
             .reset_index()
         )
@@ -178,12 +203,12 @@ class BottleneckDetector:
         )
         grouped = grouped.sort_values(
             [
+                "affected_vehicle_count",
                 "risk_level",
                 "max_risk_score",
-                "risk_score",
-                "max_delay_time",
+                "avg_iforest_risk",
+                "avg_rule_risk",
                 "avg_delay_time",
-                "affected_vehicle_count",
             ],
             ascending=[False, False, False, False, False, False],
         ).reset_index(drop=True)
@@ -193,14 +218,12 @@ class BottleneckDetector:
         for index, row in grouped.iterrows():
             summaries.append(
                 {
-                    "product_process_history_id": int(row["product_process_history_id"]),
                     "manufacturing_event_id": self._safe_int(row["manufacturing_event_id"]),
                     "car_master_id": self._safe_int(row["car_master_id"]),
                     "process_code": str(row["process_code"]),
                     "equipment_code": str(row["equipment_code"]),
-                    "station_code": str(row["station_code"]),
                     "rank_no": index + 1,
-                    "avg_delay_time": round(self._safe_float(row["avg_delay_time"], default=0.0), 1),
+                    "avg_delay_time": self._safe_float(row["avg_delay_time"], default=0.0),
                     "affected_vehicle_count": int(row["affected_vehicle_count"]),
                     "risk_score": float(row["risk_level"]),
                 },
@@ -208,7 +231,31 @@ class BottleneckDetector:
 
         return summaries
 
-    def _build_product_process_history_features(
+    @staticmethod
+    def _apply_rule_engine(features: pd.DataFrame) -> pd.DataFrame:
+        """학습 노트북과 동일한 Rule Engine 점수를 계산."""
+        result = features.copy()
+        duration_threshold = result["total_duration"].quantile(0.95)
+        station_span_threshold = result["max_station_span"].quantile(0.95)
+
+        duration_score = (
+            result["total_duration"] / max(float(duration_threshold), 1e-12)
+        ).clip(upper=2.0) / 2.0
+        station_span_score = (
+            result["max_station_span"] / max(float(station_span_threshold), 1e-12)
+        ).clip(upper=2.0) / 2.0
+
+        result["rule_risk_score"] = (
+            0.55 * duration_score
+            + 0.45 * station_span_score
+        ).fillna(0.0)
+        result["rule_bottleneck"] = (
+            result["total_duration"].ge(duration_threshold)
+            | result["max_station_span"].ge(station_span_threshold)
+        ).astype(int)
+        return result
+
+    def _build_manufacturing_event_features(
         self,
         histories: list[dict[str, Any]],
     ) -> pd.DataFrame:
@@ -216,20 +263,31 @@ class BottleneckDetector:
         source_df = pd.DataFrame(histories)
         process_time = source_df["process_time"].fillna(0).astype(float)
         waiting_time = source_df["waiting_time"].fillna(0).astype(float)
+        delay_time = source_df.get("delay_time", waiting_time).fillna(0).astype(float)
+        queue_length = source_df.get("queue_length", 0.0)
+        wip_count = source_df.get("wip_count", 0.0)
+        station_key = source_df.get(
+            "station_key",
+            source_df["equipment_code"],
+        ).fillna("UNKNOWN")
         total_duration = process_time + waiting_time
 
         # 기본 시간/식별자 피처
         feature_df = pd.DataFrame(
             {
                 "Id": source_df["id"].astype(int),
-                "product_process_history_id": source_df["id"].astype(int),
+                "id": source_df["id"].astype(int),
                 "manufacturing_event_id": source_df["manufacturing_event_id"],
                 "car_master_id": source_df["car_master_id"],
                 "process_code": source_df["process_code"].astype(str),
                 "equipment_code": source_df["equipment_code"].astype(str),
-                "station_code": source_df["station_code"].astype(str),
+                "station_key": station_key.astype(str),
                 "process_time": process_time,
                 "waiting_time": waiting_time,
+                "delay_time": delay_time,
+                "is_delayed": delay_time.gt(0).astype(int),
+                "queue_length": queue_length,
+                "wip_count": wip_count,
                 "process_start_time": 0.0,
                 "process_end_time": total_duration,
                 "total_duration": total_duration,
@@ -255,7 +313,7 @@ class BottleneckDetector:
             if line is None:
                 continue
 
-            station = str(row["station_code"])
+            station = str(row["station_key"])
             station_prefix = f"{line}_{station}"
             feature_df.at[index, f"{line}_seen"] = 1
             feature_df.at[index, f"{line}_duration"] = row["process_time"]

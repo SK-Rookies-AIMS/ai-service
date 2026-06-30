@@ -698,7 +698,7 @@ class ManufacturingEventJsonService:
 def get_manufacturing_event_json_service() -> ManufacturingEventJsonService:
     if not settings.sample_database_connection_url:
         raise AppException(
-            "SAMPLE_DATABASE_URL 설정이 필요합니다.",
+            "MAIN_DATABASE_URL + SAMPLE_DB_NAME 설정이 필요합니다.",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     return ManufacturingEventJsonService(
