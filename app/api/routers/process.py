@@ -7,7 +7,7 @@ from app.service.analysis.bottleneck_service import (
 )
 from app.utils.response_utils import success_response
 
-router = APIRouter(prefix="/api/process", tags=["공정 분석"])
+router = APIRouter(prefix="/api/process", tags=["process"])
 
 BottleneckAnalysisResponse = CommonResponse[BottleneckAnalysisPage]
 
@@ -22,7 +22,11 @@ Kafka raw 제조 이벤트를 기반으로 현재 제조 공정의 병목 순위
 
 분석 방식:
 - PRESS, BODY, PAINT, ASSEMBLY 이벤트를 Kafka에서 계속 수신해 DB에 적재합니다.
-- 병목 조회 시 저장된 raw 이벤트를 Rule Engine + Isolation Forest 모델로 분석합니다.
+- Kafka raw 이벤트가 저장되면 Rule Engine + Isolation Forest 모델로 병목 결과를 자동 갱신합니다.
+- AI 병목 분석 결과는 `factory.manufacturing.analysis` 토픽으로도 발행합니다.
+- 분석 결과 토픽의 Message Key는 raw 토픽과 동일하게 `carId`입니다.
+- 발행 payload에는 `manufacturingAnalysisData`와 `aiAnalysisData`를 포함합니다.
+- 병목 조회 시에도 저장된 raw 이벤트 기준으로 최신 결과를 다시 확인합니다.
 - 결과는 `bottleneck_analysis_result` 테이블에 저장됩니다.
 - `delayTime`은 DB에는 계산된 원본 double 값으로 저장하고, API 응답에서는 소수점 둘째 자리까지 반환합니다.
 - `processCode`는 장비 코드 기준으로 `도장 (L1)`, `프레스 (P4)` 형식으로 반환합니다.

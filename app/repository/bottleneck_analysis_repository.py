@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 
 from app.repository.sampledb_schema import manufacturing_event_json
@@ -105,6 +106,7 @@ class BottleneckAnalysisRepository:
                 manufacturing_event_json.c.car_master_id,
                 manufacturing_event_json.c.process_code,
                 manufacturing_event_json.c.equipment_id,
+                manufacturing_event_json.c.event_time,
                 manufacturing_event_json.c.event_json,
             )
             .where(manufacturing_event_json.c.is_sent.is_(True))
@@ -120,6 +122,7 @@ class BottleneckAnalysisRepository:
     def _to_bottleneck_history(self, row: dict[str, Any]) -> dict[str, Any]:
         event_json = self._event_json_dict(row["event_json"])
         equipment = event_json.get("equipment", {})
+        equipment_status = event_json.get("equipmentStatus", {})
         metrics = event_json.get("processMetrics", {})
         equipment_code = str(
             equipment.get("equipmentCode")
@@ -128,6 +131,9 @@ class BottleneckAnalysisRepository:
         )
         process_data = event_json.get("processData", {})
         process_code = str(row["process_code"])
+        operation_status = str(
+            equipment_status.get("operationStatus") or "",
+        ).upper()
         process_time = self._safe_float(metrics.get("processingTimeSec"))
         waiting_time = self._safe_float(metrics.get("waitingTimeSec"))
         cycle_time = self._safe_float(metrics.get("cycleTimeSec"))
@@ -136,10 +142,19 @@ class BottleneckAnalysisRepository:
             process_data,
             process_code,
         )
+        equipment_stop_delay_time = self._equipment_stop_delay(
+            equipment_status,
+            event_json,
+            row.get("event_time"),
+        )
         delay_time = (
             station_delay_time
             if station_delay_time > 0
             else timestamp_delay_time
+            if timestamp_delay_time > 0
+            else equipment_stop_delay_time
+            if operation_status in {"FAULT", "STOPPED", "ERROR", "DOWN"}
+            else 0.0
         )
 
         return {
@@ -148,6 +163,7 @@ class BottleneckAnalysisRepository:
             "car_master_id": row["car_master_id"],
             "process_code": process_code,
             "equipment_code": equipment_code,
+            "equipment_status": operation_status,
             "station_key": equipment_code,
             "process_time": process_time,
             "waiting_time": waiting_time,
@@ -190,6 +206,66 @@ class BottleneckAnalysisRepository:
             if isinstance(value, dict):
                 return cls._safe_float(value.get("timestampDelaySec"))
         return 0.0
+
+    @classmethod
+    def _equipment_stop_delay(
+        cls,
+        equipment_status: dict[str, Any],
+        event_json: dict[str, Any],
+        event_time_value: Any,
+    ) -> float:
+        status_changed_at = cls._parse_datetime(
+            equipment_status.get("statusChangedTime"),
+        )
+        event_time = cls._parse_datetime(
+            event_time_value,
+        ) or cls._parse_datetime(
+            cls._nested_value(event_json, "event", "eventTime"),
+        )
+        if status_changed_at is None:
+            return 0.0
+
+        last_normal_time = cls._parse_datetime(
+            equipment_status.get("lastNormalTime"),
+        )
+
+        if event_time is not None and event_time > status_changed_at:
+            return (event_time - status_changed_at).total_seconds()
+
+        if last_normal_time is not None:
+            return max((status_changed_at - last_normal_time).total_seconds(), 0.0)
+
+        if event_time is None:
+            event_time = datetime.now()
+        else:
+            return 30.0
+
+        return max((event_time - status_changed_at).total_seconds(), 0.0)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Any | None:
+        if value is None:
+            return None
+        if hasattr(value, "isoformat") and hasattr(value, "tzinfo"):
+            return value.replace(tzinfo=None)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(
+                text.replace("Z", "+00:00"),
+            ).replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _nested_value(payload: dict[str, Any], *path: str) -> Any:
+        current: Any = payload
+        for key in path:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(key)
+        return current
 
     def _init_sqlalchemy(self) -> None:
         try:

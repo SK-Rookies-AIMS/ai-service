@@ -1,4 +1,4 @@
-from kafka.net.sasl.oauth import AbstractTokenProvider
+from kafka.sasl.oauth import AbstractTokenProvider
 from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
 
 
