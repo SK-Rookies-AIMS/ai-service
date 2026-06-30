@@ -10,4 +10,3 @@ class CommonResponse(BaseModel, Generic[DataT]):
     data: DataT | None = Field(default=None, description="응답 데이터")
     message: str = Field(description="응답 메시지")
     timestamp: str = Field(description="응답 생성 시간")
-

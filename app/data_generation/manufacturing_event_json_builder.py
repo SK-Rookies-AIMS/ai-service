@@ -80,7 +80,7 @@ def initial_dispatch_status(process_code: str) -> str:
 
 def is_abnormal_operation_status(operation_status: Any) -> bool:
     """이벤트 JSON의 운전 상태가 이상 상태인지 반환한다."""
-    return operation_status in {"FAULT", "STOPPED", "MAINTENANCE"}
+    return operation_status in {"FAULT", "STOPPED"}
 
 
 def normalize_event_json(event_json: dict[str, Any]) -> dict[str, Any]:
@@ -272,7 +272,10 @@ class ManufacturingEventJsonBuilder:
                     slot=global_index,
                     total_events=total_events,
                 )
-                event_id = f"EVT-{event_time:%Y%m%d}-{global_index + 1:06d}"
+                event_date = (
+                    _production_date_from_vehicle_id(car_id) or event_time.date()
+                )
+                event_id = f"EVT-{event_date:%Y%m%d}-{global_index + 1:06d}"
                 event = self._build_event(
                     event_id=event_id,
                     event_time=event_time,
@@ -370,6 +373,8 @@ class ManufacturingEventJsonBuilder:
             process_code=process_code,
             is_abnormal=is_abnormal,
         )
+        operation_status = equipment_status["operationStatus"]
+        is_equipment_abnormal = is_abnormal_operation_status(operation_status)
 
         return {
             "event": {
@@ -385,15 +390,16 @@ class ManufacturingEventJsonBuilder:
                 "equipmentType": equipment_row["equipment_type"],
             },
             "equipmentStatus": {
-                # 운전 상태는 정상/이상 프로필 안에서 차량·공정별로 랜덤 생성한다.
-                # 시간 필드는 실제 이벤트 전송 전까지 미확정이므로 NULL로 둔다.
-                "operationStatus": equipment_status["operationStatus"],
+                # Java enum EquipmentOperationStatus 값만 사용한다.
+                "operationStatus": operation_status,
                 "lastNormalTime": (
                     (event_time - timedelta(seconds=31)).isoformat()
-                    if is_abnormal
+                    if is_equipment_abnormal
                     else None
                 ),
-                "statusChangedTime": event_time.isoformat() if is_abnormal else None,
+                "statusChangedTime": (
+                    event_time.isoformat() if is_equipment_abnormal else None
+                ),
             },
             "product": {
                 "carMasterId": car_master_id,
@@ -1036,31 +1042,43 @@ def _equipment_route_for_car(car_master_id: int) -> str:
     )
 
 
+def _production_date_from_vehicle_id(vehicle_id: str) -> date | None:
+    for token in str(vehicle_id).split("-"):
+        if len(token) != 8 or not token.isdigit():
+            continue
+        try:
+            return date(
+                int(token[0:4]),
+                int(token[4:6]),
+                int(token[6:8]),
+            )
+        except ValueError:
+            return None
+    return None
+
+
 def _equipment_status_for_event(
     *,
     car_master_id: int,
     process_code: str,
     is_abnormal: bool,
 ) -> dict[str, str]:
-    """정상/이상 유형에 맞는 설비 상태를 결정적 랜덤으로 선택한다.
-
-    정상 데이터는 RUNNING/IDLE, 이상 데이터는 FAULT/STOPPED/MAINTENANCE
-    상태군에서 선택한다. 같은 차량·공정은 재생성해도 같은 상태를 갖는다.
-    """
+    """Java enum 기준 운전 상태를 8:2 비율로 결정적 선택한다."""
+    _ = is_abnormal
     digest = hashlib.blake2b(
         f"{car_master_id}:{process_code}:status".encode("utf-8"),
         digest_size=8,
     ).digest()
     ratio = int.from_bytes(digest, "big") % 100
 
-    if not is_abnormal:
-        operation_status = "RUNNING" if ratio < 85 else "IDLE"
-    elif ratio < 50:
-        operation_status = "FAULT"
+    if ratio < 70:
+        operation_status = "RUNNING"
     elif ratio < 80:
+        operation_status = "WARNING"
+    elif ratio < 90:
         operation_status = "STOPPED"
     else:
-        operation_status = "MAINTENANCE"
+        operation_status = "FAULT"
 
     return {"operationStatus": operation_status}
 
