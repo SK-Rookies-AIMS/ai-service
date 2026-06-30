@@ -1,4 +1,5 @@
 # app/main.py
+from app.main import app
 
 import threading
 import time
