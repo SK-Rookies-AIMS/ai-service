@@ -9,8 +9,11 @@ from app.kafka.topics import (
     QUALITY_INSPECTION_STATUS_DETAIL
 )
 
+
 def run():
+
     load_dotenv()
+
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = quote_plus(
         os.getenv("DB_PASSWORD")
@@ -34,14 +37,35 @@ def run():
         group_id="ai-status-detail-group"
     )
 
-    inspection_status_detail_list = []
-
     try:
+
         for msg in consumer:
 
             row = msg.value
 
-            inspection_status_detail_list.append({
+            vehicle_id = row["vehicle_id"]
+
+            # 이미 저장된 차량인지 확인
+            exists = pd.read_sql(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM inspection_status_detail
+                WHERE vehicle_id=%s
+                """,
+                con=main_engine,
+                params=[vehicle_id]
+            )
+
+            if exists.iloc[0]["cnt"] > 0:
+
+                print(
+                    f"[STATUS] "
+                    f"{vehicle_id} 이미 저장됨"
+                )
+
+                continue
+
+            inspection_status_detail = [{
                 "car_code":
                     row["car_code"],
 
@@ -49,7 +73,7 @@ def run():
                     row["inspection_no"],
 
                 "vehicle_id":
-                    row["vehicle_id"],
+                    vehicle_id,
 
                 "speed":
                     row["speed"],
@@ -77,36 +101,10 @@ def run():
 
                 "created_at":
                     row["created_at"]
-            })
-
-            # 100건씩 저장
-            if len(
-                inspection_status_detail_list
-            ) >= 100:
-
-                df = pd.DataFrame(
-                    inspection_status_detail_list
-                )
-
-                df.to_sql(
-                    name="inspection_status_detail",
-                    con=main_engine,
-                    if_exists="append",
-                    index=False
-                )
-
-                inspection_status_detail_list.clear()
-
-    except Exception as e:
-
-        print(f"오류 발생 : {e}")
-
-    finally:
-
-        if inspection_status_detail_list:
+            }]
 
             df = pd.DataFrame(
-                inspection_status_detail_list
+                inspection_status_detail
             )
 
             df.to_sql(
@@ -117,10 +115,24 @@ def run():
             )
 
             print(
-                f"status-detail 최종 저장 완료"
+                f"[STATUS 저장 완료] "
+                f"{vehicle_id}"
             )
 
+    except Exception as e:
+
+        print(
+            f"[STATUS ERROR] {e}"
+        )
+
+    finally:
+
+        print(
+            "status-detail Consumer 종료"
+        )
+
         consumer.close()
+
 
 if __name__ == "__main__":
     run()

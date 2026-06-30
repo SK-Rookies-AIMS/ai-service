@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import pandas as pd
 from dotenv import load_dotenv
 import os
@@ -9,8 +9,11 @@ from app.kafka.topics import (
     QUALITY_INSPECTION_RISK_TREND
 )
 
+
 def run():
+
     load_dotenv()
+
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = quote_plus(
         os.getenv("DB_PASSWORD")
@@ -34,35 +37,54 @@ def run():
         group_id="ai-risk-trend-group"
     )
 
-    inspection_risk_trend_list = []
-
     try:
+
         for msg in consumer:
 
             row = msg.value
 
-            inspection_risk_trend_list.append({
-                #"id": row["id"],
-                "risk_level":
+            exists = pd.read_sql(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM inspection_risk_trend
+                WHERE risk_level=%s
+                AND DATE(created_at)=DATE(%s)
+                """,
+                con=main_engine,
+                params=[
                     row["risk_level"],
-
-                "risk_count":
-                    row["risk_count"],
-
-                "risk_ratio":
-                    row["risk_ratio"],
-
-                "created_at":
                     row["created_at"]
-            })
+                ]
+            )
 
-            if len(
-                inspection_risk_trend_list
-            ) >= 3:
+            if exists.iloc[0]["cnt"] > 0:
 
-                df = pd.DataFrame(
-                    inspection_risk_trend_list
+                with main_engine.begin() as conn:
+
+                    conn.execute(
+                        text("""
+                            UPDATE
+                                inspection_risk_trend
+                            SET
+                                risk_count=:risk_count,
+                                risk_ratio=:risk_ratio
+                            WHERE
+                                risk_level=:risk_level
+                            AND DATE(created_at)
+                                =
+                                DATE(:created_at)
+                        """),
+                        row
+                    )
+
+                print(
+                    f"[UPDATE] "
+                    f"{row['risk_level']}"
                 )
+
+            else:
+
+                df = pd.DataFrame([row])
 
                 df.to_sql(
                     name="inspection_risk_trend",
@@ -71,7 +93,10 @@ def run():
                     index=False
                 )
 
-                inspection_risk_trend_list.clear()
+                print(
+                    f"[INSERT] "
+                    f"{row['risk_level']}"
+                )
 
     except Exception as e:
 
@@ -79,24 +104,10 @@ def run():
 
     finally:
 
-        if inspection_risk_trend_list:
-
-            df = pd.DataFrame(
-                inspection_risk_trend_list
-            )
-
-            df.to_sql(
-                name="inspection_risk_trend",
-                con=main_engine,
-                if_exists="append",
-                index=False
-            )
-
-            print(
-                f"{len(inspection_risk_trend_list)}건 최종 저장 완료"
-            )
+        print("risk-trend 종료")
 
         consumer.close()
+
 
 if __name__ == "__main__":
     run()

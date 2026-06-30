@@ -1,33 +1,43 @@
 from sqlalchemy import create_engine, text
 from kafka import KafkaProducer
 from dotenv import load_dotenv
-import os
 from urllib.parse import quote_plus
 
-from datetime import datetime, timedelta
-
+import os
 import json
 import time
 
 from app.kafka.iam_provider import MSKTokenProvider
 
+
 def run():
+
     load_dotenv()
+
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = quote_plus(
         os.getenv("DB_PASSWORD")
     )
     DB_HOST = os.getenv("DB_HOST")
     DB_PORT = os.getenv("DB_PORT")
-    SAMPLE_DB_NAME = os.getenv("SAMPLE_DB_NAME")
 
     SAMPLE_DATABASE_URL = (
         f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
+        f"@{DB_HOST}:{DB_PORT}/sampledb"
+    )
+
+    MAIN_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/maindb"
     )
 
     sample_engine = create_engine(
         SAMPLE_DATABASE_URL,
+        pool_pre_ping=True
+    )
+
+    main_engine = create_engine(
+        MAIN_DATABASE_URL,
         pool_pre_ping=True
     )
 
@@ -47,8 +57,8 @@ def run():
             json.dumps(x, default=str).encode("utf-8")
     )
 
-
     def calculate_status_risk(row):
+
         score = 100
 
         if float(row["speed"]) > 120:
@@ -62,8 +72,8 @@ def run():
 
         return max(score, 0)
 
-
     def calculate_control_risk(row):
+
         score = 100
 
         if row["collision_warning"] == 1:
@@ -80,8 +90,8 @@ def run():
 
         return max(score, 0)
 
-
     def calculate_drive_risk(row):
+
         score = 100
 
         if float(row["throttle_position"]) > 90:
@@ -95,8 +105,8 @@ def run():
 
         return max(score, 0)
 
-
     def calculate_dynamics_risk(row):
+
         score = 100
 
         if abs(float(row["yaw_rate"])) > 7:
@@ -110,7 +120,6 @@ def run():
 
         return max(score, 0)
 
-
     def get_risk_level(score):
 
         if score >= 80:
@@ -121,107 +130,122 @@ def run():
 
         return "HIGH"
 
+    last_id = 0
 
-    risk_id = 1
+    while True:
 
-    base_date = datetime.strptime(
-        "2026-06-01",
-        "%Y-%m-%d"
-    )
+        with main_engine.connect() as conn:
 
-    with sample_engine.connect() as conn:
-
-        for day in range(7):
-
-            current_date = (
-                base_date +
-                timedelta(days=day)
-            )
-
-            offset = day * 100
-
-            vehicles = conn.execute(
+            cars = conn.execute(
                 text("""
-                    SELECT DISTINCT vehicle_id
-                    FROM car_status
-                    ORDER BY vehicle_id
-                    LIMIT 100 OFFSET :offset
+                    SELECT *
+                    FROM inspection_master
+                    WHERE id > :last_id
+                    ORDER BY id
                 """),
-                {"offset": offset}
+                {"last_id": last_id}
             ).mappings().all()
 
-            vehicle_ids = [
-                v["vehicle_id"]
-                for v in vehicles
-            ]
+        if not cars:
+            time.sleep(1)
+            continue
 
-            low_count = 0
-            medium_count = 0
-            high_count = 0
+        for car in cars:
 
-            for vehicle_id in vehicle_ids:
+            vehicle_id = car["vehicle_id"]
+
+            created_date = (
+                car["created_at"]
+                .strftime("%Y-%m-%d 00:00:00")
+            )
+
+            low = 0
+            medium = 0
+            high = 0
+
+            with main_engine.connect() as conn:
+
+                today_cars = conn.execute(
+                    text("""
+                        SELECT vehicle_id
+                        FROM inspection_master
+                        WHERE DATE(created_at)
+                        =
+                        DATE(:created_at)
+                    """),
+                    {
+                        "created_at":
+                            car["created_at"]
+                    }
+                ).mappings().all()
+
+            for row in today_cars:
+
+                vid = row["vehicle_id"]
 
                 scores = []
 
-                status = conn.execute(
-                    text("""
-                        SELECT *
-                        FROM car_status
-                        WHERE vehicle_id=:vehicle_id
-                        LIMIT 1
-                    """),
-                    {"vehicle_id": vehicle_id}
-                ).mappings().first()
+                with sample_engine.connect() as conn:
 
-                if status:
-                    scores.append(
-                        calculate_status_risk(status)
-                    )
+                    status = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_status
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
 
-                control = conn.execute(
-                    text("""
-                        SELECT *
-                        FROM car_control
-                        WHERE vehicle_id=:vehicle_id
-                        LIMIT 1
-                    """),
-                    {"vehicle_id": vehicle_id}
-                ).mappings().first()
+                    if status:
+                        scores.append(
+                            calculate_status_risk(status)
+                        )
 
-                if control:
-                    scores.append(
-                        calculate_control_risk(control)
-                    )
+                    control = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_control
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
 
-                drive = conn.execute(
-                    text("""
-                        SELECT *
-                        FROM car_drive
-                        WHERE vehicle_id=:vehicle_id
-                        LIMIT 1
-                    """),
-                    {"vehicle_id": vehicle_id}
-                ).mappings().first()
+                    if control:
+                        scores.append(
+                            calculate_control_risk(control)
+                        )
 
-                if drive:
-                    scores.append(
-                        calculate_drive_risk(drive)
-                    )
+                    drive = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_drive
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
 
-                dynamics = conn.execute(
-                    text("""
-                        SELECT *
-                        FROM car_dynamics
-                        WHERE vehicle_id=:vehicle_id
-                        LIMIT 1
-                    """),
-                    {"vehicle_id": vehicle_id}
-                ).mappings().first()
+                    if drive:
+                        scores.append(
+                            calculate_drive_risk(drive)
+                        )
 
-                if dynamics:
-                    scores.append(
-                        calculate_dynamics_risk(dynamics)
-                    )
+                    dynamics = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_dynamics
+                            WHERE vehicle_id=:vid
+                            LIMIT 1
+                        """),
+                        {"vid": vid}
+                    ).mappings().first()
+
+                    if dynamics:
+                        scores.append(
+                            calculate_dynamics_risk(dynamics)
+                        )
 
                 if not scores:
                     continue
@@ -235,51 +259,44 @@ def run():
                 )
 
                 if level == "LOW":
-                    low_count += 1
+                    low += 1
 
                 elif level == "MEDIUM":
-                    medium_count += 1
+                    medium += 1
 
                 else:
-                    high_count += 1
+                    high += 1
 
-            daily_result = [
-                ("LOW", low_count),
-                ("MEDIUM", medium_count),
-                ("HIGH", high_count)
-            ]
+            total = low + medium + high
 
-            for level, count in daily_result:
-
-                message = {
-                    "id": risk_id,
-                    "risk_level": level,
-                    "risk_count": count,
-
-                    # 필요하면 ratio 계산 수정
-                    "risk_ratio": round(
-                        count / 100 * 100,
-                        2
-                    ),
-
-                    "created_at":
-                        current_date.strftime(
-                            "%Y-%m-%d 00:00:00"
-                        )
-                }
+            for level, count in [
+                ("LOW", low),
+                ("MEDIUM", medium),
+                ("HIGH", high)
+            ]:
 
                 producer.send(
                     "quality.inspection.risk_trend",
-                    value=message
+                    value={
+                        "risk_level": level,
+
+                        "risk_count": count,
+
+                        "risk_ratio": round(
+                            count / total * 100, 2
+                        ) if total else 0,
+
+                        "created_at":
+                            created_date
+                    }
                 )
 
-                risk_id += 1
+            producer.flush()
 
-                time.sleep(1)
+            print(
+                f"[RISK TREND] {created_date}"
+            )
 
-    producer.flush()
+            last_id = car["id"]
 
-    print("Risk-trend Kafka 전송 완료")
-
-if __name__ == "__main__":
-    run()
+        time.sleep(1)

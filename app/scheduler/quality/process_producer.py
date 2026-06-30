@@ -2,30 +2,34 @@ from sqlalchemy import create_engine, text
 from kafka import KafkaProducer
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
-import os
 
+import os
 import json
 import time
 
 from app.kafka.iam_provider import MSKTokenProvider
 
+TOTAL_TARGET = 100
+
+
 def run():
+
     load_dotenv()
+
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = quote_plus(
         os.getenv("DB_PASSWORD")
     )
     DB_HOST = os.getenv("DB_HOST")
     DB_PORT = os.getenv("DB_PORT")
-    SAMPLE_DB_NAME = os.getenv("SAMPLE_DB_NAME")
 
-    SAMPLE_DATABASE_URL = (
+    MAIN_DATABASE_URL = (
         f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
+        f"@{DB_HOST}:{DB_PORT}/maindb"
     )
 
-    sample_engine = create_engine(
-        SAMPLE_DATABASE_URL,
+    main_engine = create_engine(
+        MAIN_DATABASE_URL,
         pool_pre_ping=True
     )
 
@@ -45,36 +49,148 @@ def run():
             json.dumps(x, default=str).encode("utf-8")
     )
 
+    last_id = 0
 
-    with sample_engine.connect() as conn:
-        process_rows = conn.execute(
-            text("""
-                SELECT
-                    DATE(created_at) AS process_date,
-                    COUNT(*) AS vehicle_count
-                FROM car_master
-                GROUP BY DATE(created_at)
-                ORDER BY process_date
-            """)
-        ).mappings().all()
+    while True:
 
+        with main_engine.connect() as conn:
 
-    for row in process_rows:
+            new_cars = conn.execute(
+                text("""
+                    SELECT id, vehicle_id
+                    FROM inspection_master
+                    WHERE id > :last_id
+                    ORDER BY id
+                """),
+                {"last_id": last_id}
+            ).mappings().all()
 
-        message = {
-            "process_date": str(row["process_date"]),
-            "vehicle_count": row["vehicle_count"]
-        }
+            total_count = conn.execute(
+                text("""
+                    SELECT COUNT(*)
+                    FROM inspection_master
+                """)
+            ).scalar()
 
-        producer.send(
-            "quality.inspection.process",
-            value=message
-        )
+        if not new_cars:
+            time.sleep(1)
+            continue
+
+        for car in new_cars:
+
+            # 생산 완료 시 모든 공정 완료
+            if total_count >= TOTAL_TARGET:
+
+                process_list = [
+                    ("VISUAL", TOTAL_TARGET),
+                    ("FUNCTION", TOTAL_TARGET),
+                    ("DRIVE", TOTAL_TARGET),
+                    ("FINAL", TOTAL_TARGET)
+                ]
+
+            # 평상시 공정 지연 효과 적용
+            else:
+
+                process_list = [
+                    (
+                        "VISUAL",
+                        min(total_count, TOTAL_TARGET)
+                    ),
+
+                    (
+                        "FUNCTION",
+                        min(
+                            max(total_count - 1, 0),
+                            TOTAL_TARGET
+                        )
+                    ),
+
+                    (
+                        "DRIVE",
+                        min(
+                            max(total_count - 2, 0),
+                            TOTAL_TARGET
+                        )
+                    ),
+
+                    (
+                        "FINAL",
+                        min(
+                            max(total_count - 3, 0),
+                            TOTAL_TARGET
+                        )
+                    )
+                ]
+
+            for process_name, completed in process_list:
+
+                waiting = max(
+                    0,
+                    TOTAL_TARGET - completed
+                )
+
+                rate = round(
+                    completed / TOTAL_TARGET * 100,
+                    2
+                )
+
+                if rate == 100:
+                    status = "COMPLETE"
+
+                elif rate == 0:
+                    status = "WAIT"
+
+                else:
+                    status = "RUNNING"
+
+                message = {
+                    "vehicle_id":
+                        car["vehicle_id"],
+
+                    "process_name":
+                        process_name,
+
+                    "total_vehicle_count":
+                        TOTAL_TARGET,
+
+                    "completed_count":
+                        completed,
+
+                    "waiting_count":
+                        waiting,
+
+                    "progress_rate":
+                        rate,
+
+                    "process_status":
+                        status,
+
+                    "created_at":
+                        time.strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                }
+
+                producer.send(
+                    "quality.inspection.process",
+                    value=message
+                )
+
+                print(
+                    f"[{process_name}] "
+                    f"{completed}/{TOTAL_TARGET} "
+                    f"({rate}%) "
+                    f"[{status}]"
+                )
+
+            producer.flush()
+
+            last_id = car["id"]
 
         time.sleep(1)
 
-    producer.flush()
-    print("porcess Kafka 전송 완료")
+    producer.close()
+
 
 if __name__ == "__main__":
     run()

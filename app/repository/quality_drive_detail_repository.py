@@ -1,6 +1,5 @@
 from sqlalchemy import create_engine
 import pandas as pd
-import json
 from dotenv import load_dotenv
 import os
 from urllib.parse import quote_plus
@@ -10,8 +9,11 @@ from app.kafka.topics import (
     QUALITY_INSPECTION_DRIVE_DETAIL
 )
 
+
 def run():
+
     load_dotenv()
+
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = quote_plus(
         os.getenv("DB_PASSWORD")
@@ -35,7 +37,6 @@ def run():
         group_id="ai-drive-detail-group"
     )
 
-
     def calculate_drive_score(row):
 
         score = 100
@@ -50,7 +51,6 @@ def run():
             score -= 20
 
         return round(score, 2)
-
 
     def get_driving_pattern(row):
 
@@ -69,84 +69,111 @@ def run():
 
         return "NORMAL"
 
-
     detail_id = 1
-    inspection_drive_detail_list = []
 
     try:
+
         for msg in consumer:
+
             row = msg.value
 
-            # 폐기 차량 제외
             if not row.get("created_at"):
                 print(
-                    f"폐기 차량 제외 : {row.get('vehicle_id')}"
+                    f"폐기 차량 제외 : "
+                    f"{row.get('vehicle_id')}"
                 )
                 continue
 
             vehicle_id = row["vehicle_id"]
+
+            # ==========================
+            # 중복 저장 방지
+            # ==========================
+            exists = pd.read_sql(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM inspection_drive_detail
+                WHERE vehicle_id = %s
+                """,
+                con=main_engine,
+                params=[vehicle_id]
+            )
+
+            if exists.iloc[0]["cnt"] > 0:
+
+                print(
+                    f"{vehicle_id} 이미 저장됨"
+                )
+
+                continue
+            # ==========================
+
             car_code = vehicle_id.split("-")[0]
 
-            inspection_no = f"DRIVE-{detail_id:05d}"
+            inspection_no = (
+                f"DRIVE-{detail_id:05d}"
+            )
 
             drive_score = calculate_drive_score(row)
-            driving_pattern = get_driving_pattern(row)
+
+            driving_pattern = (
+                get_driving_pattern(row)
+            )
 
             if drive_score >= 80:
+
                 inspection_result = "NORMAL"
                 issue_message = "NORMAL"
+
             else:
+
                 inspection_result = "WARNING"
                 issue_message = "ACCEL_ALERT"
 
-            inspection_drive_detail_list.append({
-                #"id": detail_id,
+            df = pd.DataFrame([{
                 "car_code": car_code,
                 "inspection_no": inspection_no,
                 "vehicle_id": vehicle_id,
-                "throttle_position": round(
-                    float(row["throttle_position"]), 2
-                ),
-                "brake_pressure": round(
-                    float(row["brake_pressure"]), 2
-                ),
-                "steering_angle": round(
-                    float(row["steering_angle"]), 2
-                ),
-                "drive_score": drive_score,
-                "inspection_result": inspection_result,
-                "driving_pattern": driving_pattern,
-                "issue_message": issue_message,
-                "created_at": row["created_at"]
-            })
 
-            if len(inspection_drive_detail_list) >= 100:
+                "throttle_position":
+                    round(
+                        float(
+                            row["throttle_position"]
+                        ),
+                        2
+                    ),
 
-                df = pd.DataFrame(
-                    inspection_drive_detail_list
-                )
+                "brake_pressure":
+                    round(
+                        float(
+                            row["brake_pressure"]
+                        ),
+                        2
+                    ),
 
-                df.to_sql(
-                    name="inspection_drive_detail",
-                    con=main_engine,
-                    if_exists="append",
-                    index=False
-                )
+                "steering_angle":
+                    round(
+                        float(
+                            row["steering_angle"]
+                        ),
+                        2
+                    ),
 
-                inspection_drive_detail_list.clear()
+                "drive_score":
+                    drive_score,
 
-            detail_id += 1
+                "inspection_result":
+                    inspection_result,
 
-    except Exception as e:
-        print(f"오류 발생 : {e}")
+                "driving_pattern":
+                    driving_pattern,
 
-    finally:
+                "issue_message":
+                    issue_message,
 
-        if inspection_drive_detail_list:
-
-            df = pd.DataFrame(
-                inspection_drive_detail_list
-            )
+                "created_at":
+                    row["created_at"]
+            }])
 
             df.to_sql(
                 name="inspection_drive_detail",
@@ -156,10 +183,22 @@ def run():
             )
 
             print(
-                f"drvie-detail 최종 저장 완료"
+                f"{vehicle_id} "
+                f"drive-detail 저장 완료"
             )
 
+            detail_id += 1
+
+    except Exception as e:
+
+        print(
+            f"오류 발생 : {e}"
+        )
+
+    finally:
+
         consumer.close()
+
 
 if __name__ == "__main__":
     run()
