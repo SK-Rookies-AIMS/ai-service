@@ -75,6 +75,40 @@ class ManufacturingEventRepository:
             update_existing=update_existing,
         )
 
+    def insert_raw_rows(
+        self,
+        rows: Iterable[dict[str, Any]],
+        *,
+        update_existing: bool = True,
+    ) -> int:
+        now = datetime.now()
+        payload = []
+        for row in rows:
+            event_json = normalize_event_json(copy.deepcopy(row["event_json"]))
+            payload.append(
+                {
+                    "event_id": row["event_id"],
+                    "event_time": row.get("event_time"),
+                    "car_master_id": row["car_master_id"],
+                    "process_code": row["process_code"],
+                    "equipment_id": row["equipment_id"],
+                    "event_json": event_json,
+                    "dispatch_status": "SENT",
+                    "is_sent": True,
+                    "retry_count": row.get("retry_count", 0),
+                    "error_message": row.get("error_message"),
+                    "updated_at": now,
+                },
+            )
+        if not payload:
+            return 0
+
+        payload.sort(key=lambda row: str(row["event_id"]))
+        return self._insert_payload_with_retry(
+            payload,
+            update_existing=update_existing,
+        )
+
     def _insert_payload_with_retry(
         self,
         payload: list[dict[str, Any]],

@@ -52,14 +52,12 @@ class Settings(BaseSettings):
         alias="COLLEAGUE_SKILL_API_URL",
     )
 
-    kafka_bootstrap_servers: str | None = Field(
-        default=None,
-        alias="KAFKA_BOOTSTRAP_SERVERS",
-    )
+    broker_url_1: str | None = Field(default=None, alias="BROKER_URL_1")
+    broker_url_2: str | None = Field(default=None, alias="BROKER_URL_2")
 
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     redis_key_prefix: str = Field(default="aims:ai-service", alias="REDIS_KEY_PREFIX")
-    redis_cache_ttl_seconds: int = Field(default=300, alias="REDIS_CACHE_TTL_SECONDS")
+    redis_cache_ttl_seconds: int = Field(default=60, alias="REDIS_CACHE_TTL_SECONDS")
 
     main_database_url: str | None = Field(default=None, alias="MAIN_DATABASE_URL")
     main_db_name: str | None = Field(default=None, alias="MAIN_DB_NAME")
@@ -125,6 +123,12 @@ class Settings(BaseSettings):
             if normalized in {"dev", "develop", "development", "debug"}:
                 return True
         return value
+
+    @field_validator("redis_cache_ttl_seconds", mode="before")
+    @classmethod
+    def use_default_redis_cache_ttl(cls, value: object) -> int:
+        """REDIS_CACHE_TTL_SECONDS는 .env보다 코드 기본값을 우선한다."""
+        return 60
 
     model_config = SettingsConfigDict(
         env_file=".env",

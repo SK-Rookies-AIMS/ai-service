@@ -1,3 +1,6 @@
+import logging
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -8,11 +11,27 @@ from app.core.exceptions import AppException
 from app.dto.response import BottleneckAnalysisItem, BottleneckAnalysisPage
 from app.ml.inference.bottleneck_detector import BottleneckDetector
 from app.repository.bottleneck_analysis_repository import BottleneckAnalysisRepository
-from app.utils.datetime_utils import seoul_now_iso
+from app.utils.datetime_utils import seoul_now
 from app.utils.json_utils import from_json, to_json
 
 
 DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
+BOTTLENECK_CACHE_VERSION = "v6"
+PROCESS_CODE_LABELS = {
+    "PRESS": "프레스",
+    "BODY": "차체",
+    "PAINT": "도장",
+    "ASSEMBLY": "의장",
+    "INSPECTION": "검사",
+}
+PROCESS_EQUIPMENT_PREFIXES = {
+    "PRESS": "P",
+    "BODY": "S",
+    "PAINT": "L",
+    "ASSEMBLY": "A",
+    "INSPECTION": "I",
+}
+logger = logging.getLogger(__name__)
 
 
 class BottleneckAnalysisService:
@@ -28,6 +47,7 @@ class BottleneckAnalysisService:
         self.model_path = Path(model_path or DEFAULT_BOTTLENECK_MODEL_PATH)
         self.repository = BottleneckAnalysisRepository(
             database_url or settings.bottleneck_database_url,
+            event_database_url=settings.sample_database_connection_url,
         )
         self.detector = BottleneckDetector(self.model_path)
         self._redis_client: Any | None = None
@@ -58,11 +78,13 @@ class BottleneckAnalysisService:
             content=[
                 BottleneckAnalysisItem(
                     rankNo=int(row["rank_no"]),
-                    processCode=str(row["process_code"]),
-                    stationCode=str(row["station_code"]),
-                    avgDelayTime=round(float(row["avg_delay_time"]), 1),
+                    processCode=self._format_process_code(
+                        row["process_code"],
+                        row.get("equipment_code"),
+                    ),
+                    delayTime=round(float(row["avg_delay_time"]), 2),
                     affectedVehicleCount=int(row["affected_vehicle_count"]),
-                    riskScore=int(row["risk_score"]),
+                    riskScore=float(row["risk_score"]),
                 )
                 for row in rows
             ],
@@ -83,6 +105,10 @@ class BottleneckAnalysisService:
             # cursor와 size를 key에 포함해 페이지별 캐시를 분리
             cached_value = redis_client.get(cache_key)
             if cached_value:
+                logger.info(
+                    "Bottleneck analysis cache hit: key=%s source=redis",
+                    cache_key,
+                )
                 return BottleneckAnalysisPage.model_validate(from_json(cached_value))
         except Exception as exc:
             self._redis_client = None
@@ -91,6 +117,10 @@ class BottleneckAnalysisService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             ) from exc
 
+        logger.info(
+            "Bottleneck analysis cache miss: key=%s source=kafka_raw_db",
+            cache_key,
+        )
         page = self.get_realtime_bottlenecks(cursor=cursor, size=size)
         try:
             # 오래된 결과가 과도하게 남지 않도록 설정된 TTL로 저장
@@ -109,12 +139,37 @@ class BottleneckAnalysisService:
 
     def run_analysis_and_save(self, *, cursor: int, size: int) -> tuple[int, bool]:
         """전체 공정 이력을 분석하고 요청한 순위 페이지 결과만 저장"""
-        histories = self.repository.list_product_process_histories()
+        histories = self.repository.list_manufacturing_event_histories()
         if not histories:
             raise AppException(
                 "공정 이력 데이터를 찾을 수 없습니다.",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
+
+        process_counts = Counter(str(row.get("process_code")) for row in histories)
+        event_ids = [
+            int(row["manufacturing_event_id"])
+            for row in histories
+            if row.get("manufacturing_event_id") is not None
+        ]
+        delay_times = [
+            float(row.get("delay_time") or 0.0)
+            for row in histories
+        ]
+        logger.info(
+            "Bottleneck analysis input loaded: source=kafka_raw_db "
+            "table=manufacturing_event_json filter=is_sent:true total=%s "
+            "process_counts=%s delay_time_range=%.3f..%.3f "
+            "manufacturing_event_id_range=%s..%s cursor=%s size=%s",
+            len(histories),
+            dict(sorted(process_counts.items())),
+            min(delay_times) if delay_times else 0.0,
+            max(delay_times) if delay_times else 0.0,
+            min(event_ids) if event_ids else None,
+            max(event_ids) if event_ids else None,
+            cursor,
+            size,
+        )
 
         if not self.model_path.exists():
             raise AppException(
@@ -122,20 +177,30 @@ class BottleneckAnalysisService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        summaries = self.detector.summarize_product_process_histories(histories)
+        summaries = self.detector.summarize_manufacturing_event_histories(histories)
         offset = cursor * size
         page_summaries = summaries[offset : offset + size]
         has_next = len(summaries) > offset + size
+        start_rank = offset + 1
+        end_rank = offset + size
 
-        if page_summaries:
-            start_rank = offset + 1
-            end_rank = offset + len(page_summaries)
-            self.repository.replace_results(
-                page_summaries,
-                detected_at=seoul_now_iso(),
-                start_rank=start_rank,
-                end_rank=end_rank,
-            )
+        self.repository.replace_results(
+            page_summaries,
+            detected_at=seoul_now().replace(tzinfo=None),
+            start_rank=start_rank,
+            end_rank=end_rank,
+        )
+        if not has_next:
+            self.repository.prune_results_after_rank(len(summaries))
+
+        logger.info(
+            "Bottleneck analysis results saved: source=kafka_raw_db "
+            "result_count=%s rank_range=%s..%s has_next=%s",
+            len(page_summaries),
+            start_rank,
+            end_rank,
+            has_next,
+        )
         return len(page_summaries), has_next
 
     def _redis(self) -> Any:
@@ -156,7 +221,35 @@ class BottleneckAnalysisService:
         """요청한 병목 결과 페이지에 대한 Redis key를 생성"""
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
-        return f"{settings.redis_key_prefix}:process:bottleneck:{page}:{safe_size}"
+        return (
+            f"{settings.redis_key_prefix}:process:bottleneck:"
+            f"{BOTTLENECK_CACHE_VERSION}:{page}:{safe_size}"
+        )
+
+    @staticmethod
+    def _format_process_code(
+        process_code: Any,
+        equipment_code: Any | None = None,
+    ) -> str:
+        normalized = str(process_code or "").strip().upper()
+        label = PROCESS_CODE_LABELS.get(normalized, normalized)
+        prefix = PROCESS_EQUIPMENT_PREFIXES.get(normalized)
+        equipment_no = BottleneckAnalysisService._equipment_number(
+            equipment_code,
+        )
+        if prefix and equipment_no is not None:
+            return f"{label} ({prefix}{equipment_no})"
+        return label
+
+    @staticmethod
+    def _equipment_number(equipment_code: Any | None) -> int | None:
+        if equipment_code is None:
+            return None
+
+        match = re.search(r"(\d+)$", str(equipment_code).strip())
+        if not match:
+            return None
+        return int(match.group(1))
 
 def get_bottleneck_analysis_service() -> BottleneckAnalysisService:
     """FastAPI 의존성 주입에 사용할 병목 분석 서비스를 생성"""
