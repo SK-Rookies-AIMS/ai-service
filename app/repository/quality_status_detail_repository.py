@@ -5,9 +5,8 @@ import os
 from urllib.parse import quote_plus
 
 from app.kafka.consumer import create_consumer
-from app.kafka.topics import (
-    QUALITY_INSPECTION_STATUS_DETAIL
-)
+from app.kafka.topics import QUALITY_INSPECTION_STATUS_DETAIL
+from app.kafka.options import STATUS_DETAIL_GROUP
 
 
 def run():
@@ -34,7 +33,7 @@ def run():
 
     consumer = create_consumer(
         topic=QUALITY_INSPECTION_STATUS_DETAIL,
-        group_id="ai-status-detail-group"
+        group_id=STATUS_DETAIL_GROUP
     )
 
     try:

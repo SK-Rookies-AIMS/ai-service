@@ -5,10 +5,8 @@ import os
 from urllib.parse import quote_plus
 
 from app.kafka.consumer import create_consumer
-from app.kafka.topics import (
-    QUALITY_INSPECTION_DRIVE_DETAIL
-)
-
+from app.kafka.topics import QUALITY_INSPECTION_DRIVE_DETAIL
+from app.kafka.options import DRIVE_DETAIL_GROUP
 
 def run():
 
@@ -34,7 +32,7 @@ def run():
 
     consumer = create_consumer(
         topic=QUALITY_INSPECTION_DRIVE_DETAIL,
-        group_id="ai-drive-detail-group"
+        group_id=DRIVE_DETAIL_GROUP
     )
 
     def calculate_drive_score(row):
