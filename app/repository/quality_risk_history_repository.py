@@ -1,105 +1,153 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import pandas as pd
 from dotenv import load_dotenv
 import os
+from urllib.parse import quote_plus
 
 from app.kafka.consumer import create_consumer
-from app.kafka.topics import (
-    QUALITY_INSPECTION_RISK_HISTORY
-)
+from app.kafka.topics import QUALITY_INSPECTION_RISK_HISTORY
+from app.kafka.options import RISK_HISTORY_GROUP
 
-MAIN_DATABASE_URL = (
-    os.getenv("MAIN_DATABASE_END")
-)
 
-main_engine = create_engine(
-    MAIN_DATABASE_URL,
-    pool_pre_ping=True
-)
 
-consumer = create_consumer(
-    topic=QUALITY_INSPECTION_RISK_HISTORY,
-    group_id="ai-risk-history-group"
-)
+def run():
 
-inspection_risk_history_list = []
+    load_dotenv()
 
-try:
+    DB_USER = os.getenv("DB_USER")
+    DB_PASSWORD = quote_plus(
+        os.getenv("DB_PASSWORD")
+    )
+    DB_HOST = os.getenv("DB_HOST")
+    DB_PORT = os.getenv("DB_PORT")
+    MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
 
-    print("Consumer 시작")
-    print("구독 토픽 :", consumer.subscription())
+    MAIN_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
+    )
 
-    for msg in consumer:
+    main_engine = create_engine(
+        MAIN_DATABASE_URL,
+        pool_pre_ping=True
+    )
 
-        row = msg.value
+    consumer = create_consumer(
+        topic=QUALITY_INSPECTION_RISK_HISTORY,
+        group_id=RISK_HISTORY_GROUP
+    )
 
-        print("=" * 50)
-        print(f"[Kafka 수신 성공]")
-        print(f"Topic : {msg.topic}")
-        print(f"Offset : {msg.offset}")
-        print(f"Message : {row}")
-        print("=" * 50)
+    try:
 
-        inspection_risk_history_list.append({
-            "id": row["id"],
-            "inspection_type":
-                row["inspection_type"],
+        for msg in consumer:
 
-            "inspection_round":
-                row["inspection_round"],
+            row = msg.value
 
-            "risk_score":
-                row["risk_score"],
+            inspection_type = row["inspection_type"]
+            inspection_round = row["inspection_round"]
+            risk_score = row["risk_score"]
+            start_time = row["start_time"]
+            end_time = row["end_time"]
 
-            "start_time":
-                row["start_time"],
-
-            "end_time":
-                row["end_time"]
-        })
-
-        if len(
-            inspection_risk_history_list
-        ) >= 20:
-
-            df = pd.DataFrame(
-                inspection_risk_history_list
-            )
-
-            df.to_sql(
-                name="inspection_risk_history",
+            # 같은 날짜 + 같은 검사 타입 존재 여부 확인
+            exists = pd.read_sql(
+                text("""
+                    SELECT COUNT(*) AS cnt
+                    FROM inspection_risk_history
+                    WHERE inspection_type = :inspection_type
+                    AND DATE(start_time) = DATE(:start_time)
+                """),
                 con=main_engine,
-                if_exists="append",
-                index=False
+                params={
+                    "inspection_type": row["inspection_type"],
+                    "start_time": row["start_time"]
+                }
             )
 
-            print(
-                f"{len(inspection_risk_history_list)}건 저장 완료"
-            )
+            # 존재하면 UPDATE
+            if exists.iloc[0]["cnt"] > 0:
 
-            inspection_risk_history_list.clear()
+                with main_engine.begin() as conn:
 
-except Exception as e:
+                    conn.execute(
+                        text("""
+                            UPDATE inspection_risk_history
+                            SET
+                                inspection_round=:inspection_round,
+                                risk_score=:risk_score,
+                                end_time=:end_time
+                            WHERE inspection_type=:inspection_type
+                            AND DATE(start_time)=DATE(:start_time)
+                        """),
+                        {
+                            "inspection_round":
+                                inspection_round,
 
-    print(f"오류 발생 : {e}")
+                            "risk_score":
+                                risk_score,
 
-finally:
+                            "end_time":
+                                end_time,
 
-    if inspection_risk_history_list:
+                            "inspection_type":
+                                inspection_type,
 
-        df = pd.DataFrame(
-            inspection_risk_history_list
-        )
+                            "start_time":
+                                start_time
+                        }
+                    )
 
-        df.to_sql(
-            name="inspection_risk_history",
-            con=main_engine,
-            if_exists="append",
-            index=False
-        )
+                print(
+                    f"[UPDATE] "
+                    f"{inspection_type} "
+                    f"{risk_score}"
+                )
+
+            # 없으면 INSERT
+            else:
+
+                df = pd.DataFrame([{
+                    "inspection_type":
+                        inspection_type,
+
+                    "inspection_round":
+                        inspection_round,
+
+                    "risk_score":
+                        risk_score,
+
+                    "start_time":
+                        start_time,
+
+                    "end_time":
+                        end_time
+                }])
+
+                df.to_sql(
+                    name="inspection_risk_history",
+                    con=main_engine,
+                    if_exists="append",
+                    index=False
+                )
+
+                print(
+                    f"[INSERT] "
+                    f"{inspection_type} "
+                    f"{risk_score}"
+                )
+
+    except Exception as e:
+
+        print(f"오류 발생 : {e}")
+
+    finally:
 
         print(
-            f"{len(inspection_risk_history_list)}건 최종 저장 완료"
+            "risk-history 종료"
         )
 
-    consumer.close()
+        consumer.close()
+
+
+if __name__ == "__main__":
+    run()
