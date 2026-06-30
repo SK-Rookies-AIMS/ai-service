@@ -9,88 +9,105 @@ from app.kafka.topics import (
     QUALITY_INSPECTION_STATUS_DETAIL
 )
 
-load_dotenv()
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = quote_plus(
-    os.getenv("DB_PASSWORD")
-)
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
+def run():
+    load_dotenv()
+    DB_USER = os.getenv("DB_USER")
+    DB_PASSWORD = quote_plus(
+        os.getenv("DB_PASSWORD")
+    )
+    DB_HOST = os.getenv("DB_HOST")
+    DB_PORT = os.getenv("DB_PORT")
+    MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
 
-MAIN_DATABASE_URL = (
-    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-    f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-)
+    MAIN_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
+    )
 
-main_engine = create_engine(
-    MAIN_DATABASE_URL,
-    pool_pre_ping=True
-)
+    main_engine = create_engine(
+        MAIN_DATABASE_URL,
+        pool_pre_ping=True
+    )
 
-consumer = create_consumer(
-    topic=QUALITY_INSPECTION_STATUS_DETAIL,
-    group_id="ai-status-detail-group"
-)
+    consumer = create_consumer(
+        topic=QUALITY_INSPECTION_STATUS_DETAIL,
+        group_id="ai-status-detail-group"
+    )
 
-inspection_status_detail_list = []
+    inspection_status_detail_list = []
 
-try:
+    try:
+        for msg in consumer:
 
-    print("Consumer 시작")
-    print("구독 토픽 :", consumer.subscription())
+            row = msg.value
 
-    for msg in consumer:
+            inspection_status_detail_list.append({
+                "car_code":
+                    row["car_code"],
 
-        row = msg.value
+                "inspection_no":
+                    row["inspection_no"],
 
-        print("=" * 50)
-        print("[Kafka 메시지 수신]")
-        print(row)
-        print("=" * 50)
+                "vehicle_id":
+                    row["vehicle_id"],
 
-        inspection_status_detail_list.append({
-            "car_code":
-                row["car_code"],
+                "speed":
+                    row["speed"],
 
-            "inspection_no":
-                row["inspection_no"],
+                "att":
+                    row["att"],
 
-            "vehicle_id":
-                row["vehicle_id"],
+                "gear":
+                    row["gear"],
 
-            "speed":
-                row["speed"],
+                "battery_voltage":
+                    row["battery_voltage"],
 
-            "att":
-                row["att"],
+                "fuel_rate":
+                    row["fuel_rate"],
 
-            "gear":
-                row["gear"],
+                "status_score":
+                    row["status_score"],
 
-            "battery_voltage":
-                row["battery_voltage"],
+                "inspection_result":
+                    row["inspection_result"],
 
-            "fuel_rate":
-                row["fuel_rate"],
+                "issue_message":
+                    row["issue_message"],
 
-            "status_score":
-                row["status_score"],
+                "created_at":
+                    row["created_at"]
+            })
 
-            "inspection_result":
-                row["inspection_result"],
+            # 100건씩 저장
+            if len(
+                inspection_status_detail_list
+            ) >= 100:
 
-            "issue_message":
-                row["issue_message"],
+                df = pd.DataFrame(
+                    inspection_status_detail_list
+                )
 
-            "created_at":
-                row["created_at"]
-        })
+                df.to_sql(
+                    name="inspection_status_detail",
+                    con=main_engine,
+                    if_exists="append",
+                    index=False
+                )
 
-        # 100건씩 저장
-        if len(
-            inspection_status_detail_list
-        ) >= 100:
+                print(
+                    f"{len(inspection_status_detail_list)}건 저장 완료"
+                )
+
+                inspection_status_detail_list.clear()
+
+    except Exception as e:
+
+        print(f"오류 발생 : {e}")
+
+    finally:
+
+        if inspection_status_detail_list:
 
             df = pd.DataFrame(
                 inspection_status_detail_list
@@ -104,32 +121,10 @@ try:
             )
 
             print(
-                f"{len(inspection_status_detail_list)}건 저장 완료"
+                f"{len(inspection_status_detail_list)}건 최종 저장 완료"
             )
 
-            inspection_status_detail_list.clear()
+        consumer.close()
 
-except Exception as e:
-
-    print(f"오류 발생 : {e}")
-
-finally:
-
-    if inspection_status_detail_list:
-
-        df = pd.DataFrame(
-            inspection_status_detail_list
-        )
-
-        df.to_sql(
-            name="inspection_status_detail",
-            con=main_engine,
-            if_exists="append",
-            index=False
-        )
-
-        print(
-            f"{len(inspection_status_detail_list)}건 최종 저장 완료"
-        )
-
-    consumer.close()
+if __name__ == "__main__":
+    run()

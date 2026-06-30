@@ -5,191 +5,195 @@ from dotenv import load_dotenv
 import os
 from urllib.parse import quote_plus
 
-load_dotenv()
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = quote_plus(
-    os.getenv("DB_PASSWORD")
-)
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
-SAMPLE_DB_NAME = os.getenv("SAMPLE_DB_NAME")
+def run():
+    load_dotenv()
+    DB_USER = os.getenv("DB_USER")
+    DB_PASSWORD = quote_plus(
+        os.getenv("DB_PASSWORD")
+    )
+    DB_HOST = os.getenv("DB_HOST")
+    DB_PORT = os.getenv("DB_PORT")
+    MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
+    SAMPLE_DB_NAME = os.getenv("SAMPLE_DB_NAME")
 
-MAIN_DATABASE_URL = (
-    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-    f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-)
+    MAIN_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
+    )
 
-SAMPLE_DATABASE_URL = (
-    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-    f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
-)
+    SAMPLE_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
+    )
 
-sample_engine = create_engine(
-    SAMPLE_DATABASE_URL,
-    pool_pre_ping=True
-)
+    sample_engine = create_engine(
+        SAMPLE_DATABASE_URL,
+        pool_pre_ping=True
+    )
 
-main_engine = create_engine(
-    MAIN_DATABASE_URL,
-    pool_pre_ping=True
-)
+    main_engine = create_engine(
+        MAIN_DATABASE_URL,
+        pool_pre_ping=True
+    )
 
-inspection_summary_list = []
+    inspection_summary_list = []
 
-summary_id = 1
+    summary_id = 1
 
-base_date = datetime.strptime(
-    "2026-06-01",
-    "%Y-%m-%d"
-)
+    base_date = datetime.strptime(
+        "2026-06-01",
+        "%Y-%m-%d"
+    )
 
-with sample_engine.connect() as conn:
+    with sample_engine.connect() as conn:
 
-    # 7일
-    for day in range(7):
+        # 7일
+        for day in range(7):
 
-        current_date = (
-            base_date +
-            timedelta(days=day)
-        )
-
-        offset = day * 100
-
-        vehicles = conn.execute(
-            text("""
-                SELECT vehicle_id
-                FROM (
-                    SELECT DISTINCT vehicle_id
-                    FROM car_drive
-                    ORDER BY vehicle_id
-                    LIMIT 100 OFFSET :offset
-                ) t
-            """),
-            {
-                "offset": offset
-            }
-        ).mappings().all()
-
-        vehicle_ids = [
-            row["vehicle_id"]
-            for row in vehicles
-        ]
-
-        checkpoints = [
-
-            (25, "01:00"),
-            (50, "01:15"),
-            (75, "01:30"),
-            (100, "01:45")
-
-        ]
-
-        for target_count, time_str in checkpoints:
-
-            current_vehicle_ids = (
-                vehicle_ids[:target_count]
+            current_date = (
+                base_date +
+                timedelta(days=day)
             )
 
-            normal_count = 0
-            abnormal_count = 0
+            offset = day * 100
 
-            for vehicle_id in current_vehicle_ids:
-
-                drive_row = conn.execute(
-                    text("""
-                        SELECT *
+            vehicles = conn.execute(
+                text("""
+                    SELECT vehicle_id
+                    FROM (
+                        SELECT DISTINCT vehicle_id
                         FROM car_drive
-                        WHERE vehicle_id=:vehicle_id
-                        LIMIT 1
-                    """),
-                    {
-                        "vehicle_id": vehicle_id
-                    }
-                ).mappings().first()
+                        ORDER BY vehicle_id
+                        LIMIT 100 OFFSET :offset
+                    ) t
+                """),
+                {
+                    "offset": offset
+                }
+            ).mappings().all()
 
-                if not drive_row:
-                    continue
+            vehicle_ids = [
+                row["vehicle_id"]
+                for row in vehicles
+            ]
 
-                score = 100
+            checkpoints = [
 
-                if float(
-                    drive_row["throttle_position"]
-                ) > 90:
-                    score -= 20
+                (25, "01:00"),
+                (50, "01:15"),
+                (75, "01:30"),
+                (100, "01:45")
 
-                if float(
-                    drive_row["brake_pressure"]
-                ) > 45:
-                    score -= 20
+            ]
 
-                if abs(float(
-                    drive_row["steering_angle"]
-                )) > 40:
-                    score -= 20
+            for target_count, time_str in checkpoints:
 
-                if score >= 80:
-                    normal_count += 1
-                else:
-                    abnormal_count += 1
+                current_vehicle_ids = (
+                    vehicle_ids[:target_count]
+                )
 
-            total_count = target_count
+                normal_count = 0
+                abnormal_count = 0
 
-            standby_count = (
-                100 - total_count
-            )
+                for vehicle_id in current_vehicle_ids:
 
-            created_at = datetime.strptime(
-                f"{current_date.strftime('%Y-%m-%d')} {time_str}",
-                "%Y-%m-%d %H:%M"
-            )
+                    drive_row = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_drive
+                            WHERE vehicle_id=:vehicle_id
+                            LIMIT 1
+                        """),
+                        {
+                            "vehicle_id": vehicle_id
+                        }
+                    ).mappings().first()
 
-            inspection_summary_list.append({
+                    if not drive_row:
+                        continue
 
-                "id": summary_id,
+                    score = 100
 
-                "total_count": total_count,
+                    if float(
+                        drive_row["throttle_position"]
+                    ) > 90:
+                        score -= 20
 
-                "normal_count": normal_count,
+                    if float(
+                        drive_row["brake_pressure"]
+                    ) > 45:
+                        score -= 20
 
-                "normal_rate":
-                    round(
-                        normal_count /
-                        total_count * 100,
-                        2
-                    ),
+                    if abs(float(
+                        drive_row["steering_angle"]
+                    )) > 40:
+                        score -= 20
 
-                "abnormal_count":
-                    abnormal_count,
+                    if score >= 80:
+                        normal_count += 1
+                    else:
+                        abnormal_count += 1
 
-                "abnormal_rate":
-                    round(
-                        abnormal_count /
-                        total_count * 100,
-                        2
-                    ),
+                total_count = target_count
 
-                "stanby_count":
-                    standby_count,
+                standby_count = (
+                    100 - total_count
+                )
 
-                "created_at":
-                    created_at
+                created_at = datetime.strptime(
+                    f"{current_date.strftime('%Y-%m-%d')} {time_str}",
+                    "%Y-%m-%d %H:%M"
+                )
 
-            })
+                inspection_summary_list.append({
 
-            summary_id += 1
+                    "id": summary_id,
 
-df = pd.DataFrame(
-    inspection_summary_list
-)
+                    "total_count": total_count,
 
-df.to_sql(
-    name="inspection_summary",
-    con=main_engine,
-    if_exists="append",
-    index=False
-)
+                    "normal_count": normal_count,
 
-print(
-    f"summary table 전송 완료"
-)
+                    "normal_rate":
+                        round(
+                            normal_count /
+                            total_count * 100,
+                            2
+                        ),
+
+                    "abnormal_count":
+                        abnormal_count,
+
+                    "abnormal_rate":
+                        round(
+                            abnormal_count /
+                            total_count * 100,
+                            2
+                        ),
+
+                    "stanby_count":
+                        standby_count,
+
+                    "created_at":
+                        created_at
+
+                })
+
+                summary_id += 1
+
+    df = pd.DataFrame(
+        inspection_summary_list
+    )
+
+    df.to_sql(
+        name="inspection_summary",
+        con=main_engine,
+        if_exists="append",
+        index=False
+    )
+
+    print(
+        f"summary table 전송 완료"
+    )
+
+if __name__ == "__main__":
+    run()

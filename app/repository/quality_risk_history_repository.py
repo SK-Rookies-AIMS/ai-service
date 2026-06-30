@@ -9,69 +9,80 @@ from app.kafka.topics import (
     QUALITY_INSPECTION_RISK_HISTORY
 )
 
-load_dotenv()
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = quote_plus(
-    os.getenv("DB_PASSWORD")
-)
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
+def run():
+    load_dotenv()
+    DB_USER = os.getenv("DB_USER")
+    DB_PASSWORD = quote_plus(
+        os.getenv("DB_PASSWORD")
+    )
+    DB_HOST = os.getenv("DB_HOST")
+    DB_PORT = os.getenv("DB_PORT")
+    MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
 
-MAIN_DATABASE_URL = (
-    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-    f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-)
+    MAIN_DATABASE_URL = (
+        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+        f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
+    )
 
-main_engine = create_engine(
-    MAIN_DATABASE_URL,
-    pool_pre_ping=True
-)
+    main_engine = create_engine(
+        MAIN_DATABASE_URL,
+        pool_pre_ping=True
+    )
 
-consumer = create_consumer(
-    topic=QUALITY_INSPECTION_RISK_HISTORY,
-    group_id="ai-risk-history-group"
-)
+    consumer = create_consumer(
+        topic=QUALITY_INSPECTION_RISK_HISTORY,
+        group_id="ai-risk-history-group"
+    )
 
-inspection_risk_history_list = []
+    inspection_risk_history_list = []
 
-try:
+    try:
+        for msg in consumer:
 
-    print("Consumer 시작")
-    print("구독 토픽 :", consumer.subscription())
+            row = msg.value
 
-    for msg in consumer:
+            inspection_risk_history_list.append({
+                "id": row["id"],
+                "inspection_type":
+                    row["inspection_type"],
 
-        row = msg.value
+                "inspection_round":
+                    row["inspection_round"],
 
-        print("=" * 50)
-        print(f"[Kafka 수신 성공]")
-        print(f"Topic : {msg.topic}")
-        print(f"Offset : {msg.offset}")
-        print(f"Message : {row}")
-        print("=" * 50)
+                "risk_score":
+                    row["risk_score"],
 
-        inspection_risk_history_list.append({
-            "id": row["id"],
-            "inspection_type":
-                row["inspection_type"],
+                "start_time":
+                    row["start_time"],
 
-            "inspection_round":
-                row["inspection_round"],
+                "end_time":
+                    row["end_time"]
+            })
 
-            "risk_score":
-                row["risk_score"],
+            if len(
+                inspection_risk_history_list
+            ) >= 4:
 
-            "start_time":
-                row["start_time"],
+                df = pd.DataFrame(
+                    inspection_risk_history_list
+                )
 
-            "end_time":
-                row["end_time"]
-        })
+                df.to_sql(
+                    name="inspection_risk_history",
+                    con=main_engine,
+                    if_exists="append",
+                    index=False
+                )
 
-        if len(
-            inspection_risk_history_list
-        ) >= 4:
+                inspection_risk_history_list.clear()
+
+    except Exception as e:
+
+        print(f"오류 발생 : {e}")
+
+    finally:
+
+        if inspection_risk_history_list:
 
             df = pd.DataFrame(
                 inspection_risk_history_list
@@ -85,32 +96,10 @@ try:
             )
 
             print(
-                f"{len(inspection_risk_history_list)}건 저장 완료"
+                f"{len(inspection_risk_history_list)}건 최종 저장 완료"
             )
 
-            inspection_risk_history_list.clear()
+        consumer.close()
 
-except Exception as e:
-
-    print(f"오류 발생 : {e}")
-
-finally:
-
-    if inspection_risk_history_list:
-
-        df = pd.DataFrame(
-            inspection_risk_history_list
-        )
-
-        df.to_sql(
-            name="inspection_risk_history",
-            con=main_engine,
-            if_exists="append",
-            index=False
-        )
-
-        print(
-            f"{len(inspection_risk_history_list)}건 최종 저장 완료"
-        )
-
-    consumer.close()
+if __name__ == "__main__":
+    run()
