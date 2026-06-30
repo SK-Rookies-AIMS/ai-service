@@ -71,10 +71,6 @@ def run():
                     index=False
                 )
 
-                print(
-                    f"{len(inspection_risk_trend_list)}건 저장 완료"
-                )
-
                 inspection_risk_trend_list.clear()
 
     except Exception as e:

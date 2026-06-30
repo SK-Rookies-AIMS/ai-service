@@ -96,7 +96,7 @@ def run():
             )
 
             print(
-                f"{len(inspection_risk_history_list)}건 최종 저장 완료"
+                f"risk-history 최종 저장 완료"
             )
 
         consumer.close()

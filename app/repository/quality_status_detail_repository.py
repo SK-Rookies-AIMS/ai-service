@@ -95,10 +95,6 @@ def run():
                     index=False
                 )
 
-                print(
-                    f"{len(inspection_status_detail_list)}건 저장 완료"
-                )
-
                 inspection_status_detail_list.clear()
 
     except Exception as e:
@@ -121,7 +117,7 @@ def run():
             )
 
             print(
-                f"{len(inspection_status_detail_list)}건 최종 저장 완료"
+                f"status-detail 최종 저장 완료"
             )
 
         consumer.close()

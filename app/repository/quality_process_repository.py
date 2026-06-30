@@ -104,16 +104,15 @@ def run():
                 index=False
             )
 
-            print(
-                f"{len(inspection_process_list)}건 저장 완료"
-            )
-
             inspection_process_list.clear()
 
     except Exception as e:
         print(f"오류 발생 : {e}")
 
     finally:
+        print(
+            f"process 최종 저장 완료"
+        )
         consumer.close()
 
 if __name__ == "__main__":

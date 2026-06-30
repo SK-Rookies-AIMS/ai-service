@@ -74,7 +74,7 @@ def run():
         time.sleep(1)
 
     producer.flush()
-    print("모든 데이터 Kafka 전송 완료")
+    print("porcess Kafka 전송 완료")
 
 if __name__ == "__main__":
     run()

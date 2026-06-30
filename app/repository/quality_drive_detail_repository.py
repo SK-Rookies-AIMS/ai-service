@@ -156,7 +156,7 @@ def run():
             )
 
             print(
-                f"{len(inspection_drive_detail_list)}건 최종 저장 완료"
+                f"drvie-detail 최종 저장 완료"
             )
 
         consumer.close()
