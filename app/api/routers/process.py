@@ -31,6 +31,7 @@ Kafka raw 제조 이벤트를 기반으로 현재 제조 공정의 병목 순위
 - `cursor`는 페이지 번호입니다. 생략하면 `0`으로 처리됩니다.
 - `size=5`, `cursor=0`이면 1~5위, `cursor=1`이면 6~10위를 반환합니다.
 - `hasNext=false`이면 다음 페이지를 호출하지 않아야 합니다.
+- 분석 가능한 이벤트가 없거나 cursor가 마지막 페이지를 넘으면 404가 아니라 빈 `content`와 `hasNext=false`를 반환합니다.
 
 캐시:
 - Redis에 cursor/size별 결과를 캐시합니다.
@@ -78,9 +79,6 @@ BottleneckAnalysisExample = {
                     "example": BottleneckAnalysisExample,
                 },
             },
-        },
-        404: {
-            "description": "분석 가능한 제조 이벤트 또는 병목 분석 결과가 없는 경우",
         },
         500: {
             "description": "Redis 캐시, 모델 파일, DB 처리 중 오류가 발생한 경우",

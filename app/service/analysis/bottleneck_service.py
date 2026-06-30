@@ -67,9 +67,10 @@ class BottleneckAnalysisService:
         # 저장소에서 요청 페이지 범위만 조회
         rows = self.repository.list_results(cursor=page, size=size)
         if saved_count == 0 or not rows:
-            raise AppException(
-                "병목 분석 결과를 찾을 수 없습니다.",
-                status_code=status.HTTP_404_NOT_FOUND,
+            return BottleneckAnalysisPage(
+                content=[],
+                hasNext=False,
+                nextCursor=None,
             )
 
         next_cursor = page + 1 if has_next else None
@@ -141,10 +142,15 @@ class BottleneckAnalysisService:
         """전체 공정 이력을 분석하고 요청한 순위 페이지 결과만 저장"""
         histories = self.repository.list_manufacturing_event_histories()
         if not histories:
-            raise AppException(
-                "공정 이력 데이터를 찾을 수 없습니다.",
-                status_code=status.HTTP_404_NOT_FOUND,
+            logger.info(
+                "Bottleneck analysis skipped: source=kafka_raw_db "
+                "table=manufacturing_event_json filter=is_sent:true total=0 "
+                "cursor=%s size=%s",
+                cursor,
+                size,
             )
+            self.repository.prune_results_after_rank(0)
+            return 0, False
 
         process_counts = Counter(str(row.get("process_code")) for row in histories)
         event_ids = [
