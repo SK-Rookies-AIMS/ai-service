@@ -3,6 +3,7 @@ import pandas as pd
 from dotenv import load_dotenv
 import os
 from urllib.parse import quote_plus
+import requests
 
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import QUALITY_INSPECTION_DRIVE_DETAIL
@@ -180,6 +181,10 @@ def run():
                 con=main_engine,
                 if_exists="append",
                 index=False
+            )
+
+            requests.post(
+                f"http://{os.getenv("QUALITY_URL")}:8083/internal/notify/drive"
             )
 
             detail_id += 1

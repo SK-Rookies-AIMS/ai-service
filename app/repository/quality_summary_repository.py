@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from urllib.parse import quote_plus
 import os
 import time
+import requests
 
 
 def run():
@@ -166,12 +167,8 @@ def run():
                     }
                 )
 
-                print(
-                    f"[UPDATE] "
-                    f"완료:{total_count} "
-                    f"정상:{normal_count} "
-                    f"이상:{abnormal_count} "
-                    f"대기:{standby_count}"
+                requests.post(
+                    f"http://{os.getenv("QUALITY_URL")}:8083/internal/notify/summary"
                 )
 
             last_total_count = total_count
