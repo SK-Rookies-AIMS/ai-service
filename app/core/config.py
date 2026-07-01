@@ -38,7 +38,7 @@ def database_url_with_name(database_url: str, database_name: str | None) -> str:
 
 
 class Settings(BaseSettings):
-    """환경 변수와 .env 파일에서 애플리케이션 설정을 로드한다."""
+    """Application settings loaded from environment variables and .env."""
 
     app_name: str = Field(default="AI Service", alias="APP_NAME")
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
@@ -89,16 +89,16 @@ class Settings(BaseSettings):
         if self.main_database_url:
             return database_url_with_name(self.main_database_url, self.main_db_name)
 
-        raise ValueError("maindb MySQL 설정이 필요합니다: MAIN_DATABASE_URL")
+        raise ValueError("maindb MySQL setting is required: MAIN_DATABASE_URL")
 
     @property
     def bottleneck_database_url(self) -> str:
-        """병목 분석 결과를 저장할 maindb MySQL URL을 반환한다."""
+        """Return the main DB URL used for bottleneck analysis results."""
         return self.main_database_connection_url
 
     @property
     def sample_database_connection_url(self) -> str | None:
-        """sampledb 설정이 있으면 MySQL URL을 반환한다."""
+        """Return the sample DB URL when SAMPLE_DB_NAME is configured."""
         if self.main_database_url and self.sample_db_name:
             return database_url_with_name(self.main_database_url, self.sample_db_name)
 
@@ -106,16 +106,15 @@ class Settings(BaseSettings):
 
     @property
     def redis_connection_url(self) -> str:
-        """캐시 클라이언트가 사용할 Redis URL을 반환한다."""
+        """Return the Redis connection URL."""
         if self.redis_url:
             return self.redis_url
 
-        raise ValueError("Redis 설정이 필요합니다: REDIS_URL")
+        raise ValueError("Redis setting is required: REDIS_URL")
 
     @field_validator("debug", mode="before")
     @classmethod
     def parse_debug_value(cls, value: object) -> object:
-        """dev/prod 같은 환경 이름을 debug 여부로 변환한다."""
         if isinstance(value, str):
             normalized = value.strip().lower()
             if normalized in {"release", "prod", "production"}:
@@ -123,12 +122,6 @@ class Settings(BaseSettings):
             if normalized in {"dev", "develop", "development", "debug"}:
                 return True
         return value
-
-    @field_validator("redis_cache_ttl_seconds", mode="before")
-    @classmethod
-    def use_default_redis_cache_ttl(cls, value: object) -> int:
-        """REDIS_CACHE_TTL_SECONDS는 .env보다 코드 기본값을 우선한다."""
-        return 60
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -140,7 +133,7 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """프로세스마다 설정 객체를 한 번 생성해 재사용한다."""
+    """Return the process-wide cached settings object."""
     return Settings()
 
 
