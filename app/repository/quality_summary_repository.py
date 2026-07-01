@@ -168,7 +168,7 @@ def run():
                 )
 
                 requests.post(
-                    f"http://{os.getenv("QUALITY_URL")}:8083/internal/notify/summary"
+                    f"http://{os.getenv('QUALITY_URL')}:8083/internal/notify/summary"
                 )
 
             last_total_count = total_count

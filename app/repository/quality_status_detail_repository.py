@@ -110,7 +110,7 @@ def run():
             )
 
             requests.post(
-                f"http://{os.getenv("QUALITY_URL")}:8083/internal/notify/status"
+                f"http://{os.getenv('QUALITY_URL')}:8083/internal/notify/status"
             )
 
     except Exception as e:

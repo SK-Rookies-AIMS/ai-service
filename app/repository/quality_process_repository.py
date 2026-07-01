@@ -132,7 +132,7 @@ def run():
                 )
 
                 requests.post(
-                    f"http://{os.getenv("QUALITY_URL")}:8083/internal/notify/process"
+                    f"http://{os.getenv('QUALITY_URL')}:8083/internal/notify/process"
                 )
 
     except Exception as e:
