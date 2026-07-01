@@ -293,10 +293,6 @@ def run():
 
             producer.flush()
 
-            print(
-                f"[RISK TREND] {created_date}"
-            )
-
             last_id = car["id"]
 
         time.sleep(1)

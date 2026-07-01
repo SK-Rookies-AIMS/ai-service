@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import pandas as pd
 from dotenv import load_dotenv
 import os
@@ -46,25 +46,26 @@ def run():
                 print("구버전 메시지 무시")
                 continue
 
+            total_vehicle_count = row["total_vehicle_count"]
             process_name = row["process_name"]
             completed_count = row["completed_count"]
             waiting_count = row["waiting_count"]
-            progress_rate = row["completion_rate"]
+            progress_rate = row["progress_rate"]
             created_at = row["created_at"]
 
             # 같은 날짜 + 같은 공정 존재 여부 확인
             exists = pd.read_sql(
-                """
-                SELECT COUNT(*) AS cnt
-                FROM inspection_process
-                WHERE process_name=%s
-                  AND DATE(created_at)=DATE(%s)
-                """,
+                text("""
+                    SELECT COUNT(*) AS cnt
+                    FROM inspection_process
+                    WHERE process_name = :process_name
+                    AND DATE(created_at) = DATE(:created_at)
+                """),
                 con=main_engine,
-                params=[
-                    process_name,
-                    created_at
-                ]
+                params={
+                    "process_name": process_name,
+                    "created_at": created_at
+                }
             )
 
             if exists.iloc[0]["cnt"] > 0:
@@ -73,34 +74,26 @@ def run():
                 with main_engine.begin() as conn:
 
                     conn.execute(
-                        """
-                        UPDATE inspection_process
-                        SET
-                            completed_count=%s,
-                            waiting_count=%s,
-                            progress_rate=%s,
-                            process_status=%s
-                        WHERE process_name=%s
-                          AND DATE(created_at)=DATE(%s)
-                        """,
-                        (
-                            completed_count,
-                            waiting_count,
-                            progress_rate,
-
-                            "COMPLETE"
-                            if progress_rate == 100
-                            else "RUNNING",
-
-                            process_name,
-                            created_at
-                        )
+                        text("""
+                            UPDATE inspection_process
+                            SET
+                                completed_count=:completed_count,
+                                waiting_count=:waiting_count,
+                                progress_rate=:progress_rate,
+                                process_status=:process_status
+                            WHERE process_name=:process_name
+                            AND DATE(created_at)=DATE(:created_at)
+                        """),
+                        {
+                            "completed_count": completed_count,
+                            "waiting_count": waiting_count,
+                            "progress_rate": progress_rate,
+                            "process_status":
+                                "COMPLETE" if progress_rate == 100 else "RUNNING",
+                            "process_name": process_name,
+                            "created_at": created_at
+                        }
                     )
-
-                print(
-                    f"[UPDATE] {process_name} "
-                    f"{progress_rate}%"
-                )
 
             else:
 
@@ -110,8 +103,7 @@ def run():
                     "process_name": process_name,
 
                     "total_vehicle_count":
-                        completed_count
-                        + waiting_count,
+                        total_vehicle_count,
 
                     "completed_count":
                         completed_count,
@@ -136,11 +128,6 @@ def run():
                     con=main_engine,
                     if_exists="append",
                     index=False
-                )
-
-                print(
-                    f"[INSERT] {process_name} "
-                    f"{progress_rate}%"
                 )
 
     except Exception as e:

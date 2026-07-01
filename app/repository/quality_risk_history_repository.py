@@ -9,15 +9,12 @@ from app.kafka.topics import QUALITY_INSPECTION_RISK_HISTORY
 from app.kafka.options import RISK_HISTORY_GROUP
 
 
-
 def run():
 
     load_dotenv()
 
     DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(
-        os.getenv("DB_PASSWORD")
-    )
+    DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD"))
     DB_HOST = os.getenv("DB_HOST")
     DB_PORT = os.getenv("DB_PORT")
     MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
@@ -43,11 +40,14 @@ def run():
 
             row = msg.value
 
+            # Producer에서 전달되는 값
             inspection_type = row["inspection_type"]
-            inspection_round = row["inspection_round"]
+            inspection_date = row["inspection_date"]
             risk_score = row["risk_score"]
-            start_time = row["start_time"]
-            end_time = row["end_time"]
+
+            # Repository에서 생성
+            start_time = f"{inspection_date} 00:00:00"
+            end_time = f"{inspection_date} 23:59:59"
 
             # 같은 날짜 + 같은 검사 타입 존재 여부 확인
             exists = pd.read_sql(
@@ -55,16 +55,16 @@ def run():
                     SELECT COUNT(*) AS cnt
                     FROM inspection_risk_history
                     WHERE inspection_type = :inspection_type
-                    AND DATE(start_time) = DATE(:start_time)
+                      AND DATE(start_time) = DATE(:start_time)
                 """),
                 con=main_engine,
                 params={
-                    "inspection_type": row["inspection_type"],
-                    "start_time": row["start_time"]
+                    "inspection_type": inspection_type,
+                    "start_time": start_time
                 }
             )
 
-            # 존재하면 UPDATE
+            # 이미 존재하면 UPDATE
             if exists.iloc[0]["cnt"] > 0:
 
                 with main_engine.begin() as conn:
@@ -73,54 +73,41 @@ def run():
                         text("""
                             UPDATE inspection_risk_history
                             SET
-                                inspection_round=:inspection_round,
-                                risk_score=:risk_score,
-                                end_time=:end_time
-                            WHERE inspection_type=:inspection_type
-                            AND DATE(start_time)=DATE(:start_time)
+                                risk_score = :risk_score,
+                                end_time = :end_time
+                            WHERE inspection_type = :inspection_type
+                              AND DATE(start_time) = DATE(:start_time)
                         """),
                         {
-                            "inspection_round":
-                                inspection_round,
-
-                            "risk_score":
-                                risk_score,
-
-                            "end_time":
-                                end_time,
-
-                            "inspection_type":
-                                inspection_type,
-
-                            "start_time":
-                                start_time
+                            "risk_score": risk_score,
+                            "end_time": end_time,
+                            "inspection_type": inspection_type,
+                            "start_time": start_time
                         }
                     )
 
-                print(
-                    f"[UPDATE] "
-                    f"{inspection_type} "
-                    f"{risk_score}"
-                )
-
-            # 없으면 INSERT
             else:
 
+                # inspection_round 자동 생성
+                with main_engine.begin() as conn:
+
+                    inspection_round = conn.execute(
+                        text("""
+                            SELECT COALESCE(MAX(inspection_round), 0) + 1
+                            FROM inspection_risk_history
+                            WHERE inspection_type = :inspection_type
+                        """),
+                        {
+                            "inspection_type": inspection_type
+                        }
+                    ).scalar()
+
                 df = pd.DataFrame([{
-                    "inspection_type":
-                        inspection_type,
-
-                    "inspection_round":
-                        inspection_round,
-
-                    "risk_score":
-                        risk_score,
-
-                    "start_time":
-                        start_time,
-
-                    "end_time":
-                        end_time
+                    "inspection_type": inspection_type,
+                    "inspection_round": inspection_round,
+                    "risk_score": risk_score,
+                    "start_time": start_time,
+                    "end_time": end_time
                 }])
 
                 df.to_sql(
@@ -130,22 +117,14 @@ def run():
                     index=False
                 )
 
-                print(
-                    f"[INSERT] "
-                    f"{inspection_type} "
-                    f"{risk_score}"
-                )
-
     except Exception as e:
 
-        print(f"오류 발생 : {e}")
+        import traceback
+        traceback.print_exc()
 
     finally:
 
-        print(
-            "risk-history 종료"
-        )
-
+        print("risk-history 종료")
         consumer.close()
 
 

@@ -76,11 +76,6 @@ def run():
                         row
                     )
 
-                print(
-                    f"[UPDATE] "
-                    f"{row['risk_level']}"
-                )
-
             else:
 
                 df = pd.DataFrame([row])
@@ -90,11 +85,6 @@ def run():
                     con=main_engine,
                     if_exists="append",
                     index=False
-                )
-
-                print(
-                    f"[INSERT] "
-                    f"{row['risk_level']}"
                 )
 
     except Exception as e:

@@ -182,11 +182,6 @@ def run():
                 index=False
             )
 
-            print(
-                f"{vehicle_id} "
-                f"drive-detail 저장 완료"
-            )
-
             detail_id += 1
 
     except Exception as e:
