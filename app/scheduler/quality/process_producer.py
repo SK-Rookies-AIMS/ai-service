@@ -168,13 +168,6 @@ def run():
                     value=message
                 )
 
-                print(
-                    f"[{process_name}] "
-                    f"{completed}/{TOTAL_TARGET} "
-                    f"({progress_rate}%) "
-                    f"[{process_status}]"
-                )
-
             producer.flush()
 
             last_id = car["id"]

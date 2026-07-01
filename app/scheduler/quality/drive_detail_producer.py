@@ -100,10 +100,6 @@ def run():
                 last_id = car["id"]
                 continue
 
-            print(
-                f"[Drive] {vehicle_id} 분석 시작"
-            )
-
             for row in drive_rows:
 
                 message = {
@@ -139,10 +135,6 @@ def run():
                 )
 
             producer.flush()
-
-            print(
-                f"[Drive] {vehicle_id} Kafka 전송 완료"
-            )
 
             # 처리 완료 차량 갱신
             last_id = car["id"]

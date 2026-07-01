@@ -275,13 +275,6 @@ def run():
                     value=message
                 )
 
-                print(
-                    f"[{inspection_date}] "
-                    f"{inspection_type}"
-                    f" 점수 : "
-                    f"{risk_score}"
-                )
-
             producer.flush()
 
             last_id = car["id"]
