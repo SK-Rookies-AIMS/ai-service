@@ -55,17 +55,17 @@ def run():
 
             # 같은 날짜 + 같은 공정 존재 여부 확인
             exists = pd.read_sql(
-                """
-                SELECT COUNT(*) AS cnt
-                FROM inspection_process
-                WHERE process_name=%s
-                  AND DATE(created_at)=DATE(%s)
-                """,
+                text("""
+                    SELECT COUNT(*) AS cnt
+                    FROM inspection_process
+                    WHERE process_name = :process_name
+                    AND DATE(created_at) = DATE(:created_at)
+                """),
                 con=main_engine,
-                params=[
-                    process_name,
-                    created_at
-                ]
+                params={
+                    "process_name": process_name,
+                    "created_at": created_at
+                }
             )
 
             if exists.iloc[0]["cnt"] > 0:
