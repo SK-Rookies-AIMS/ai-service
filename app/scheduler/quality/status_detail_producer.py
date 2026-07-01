@@ -225,11 +225,6 @@ def run():
 
                 producer.flush()
 
-                print(
-                    f"[STATUS] "
-                    f"{vehicle_id} 전송 완료"
-                )
-
                 last_id = car["id"]
 
         time.sleep(1)
