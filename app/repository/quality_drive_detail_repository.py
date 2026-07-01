@@ -183,10 +183,6 @@ def run():
                 index=False
             )
 
-            requests.post(
-                f"http://{os.getenv('QUALITY_URL')}:8083/internal/notify/drive"
-            )
-
             detail_id += 1
 
     except Exception as e:

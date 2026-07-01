@@ -131,10 +131,6 @@ def run():
                     index=False
                 )
 
-                requests.post(
-                    f"http://{os.getenv('QUALITY_URL')}:8083/internal/notify/process"
-                )
-
     except Exception as e:
         print(f"오류 발생 : {e}")
 
