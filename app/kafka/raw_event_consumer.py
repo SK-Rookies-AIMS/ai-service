@@ -13,6 +13,13 @@ from fastapi import FastAPI
 
 from app.core.config import settings
 from app.kafka.iam_provider import MSKTokenProvider
+from app.ml.inference.defect_transfer_detector import (
+    DefectTransferDetector,
+    DefectTransferPrediction,
+)
+from app.repository.defect_transfer_prediction_repository import (
+    DefectTransferPredictionRepository,
+)
 from app.repository.sampledb_repository import SampleDbRepository
 from app.service.analysis.bottleneck_service import BottleneckAnalysisService
 from app.utils.datetime_utils import seoul_now_iso
@@ -95,6 +102,8 @@ def _run_raw_event_consumer(
     repository = SampleDbRepository(settings.sample_database_connection_url)
     repository.schema.ensure_schema()
     analysis_service = _create_bottleneck_analysis_service()
+    defect_detector = _create_defect_transfer_detector()
+    defect_result_repository = _create_defect_transfer_result_repository()
     analysis_producer = _create_analysis_producer(
         KafkaProducer,
         bootstrap_servers,
@@ -117,6 +126,8 @@ def _run_raw_event_consumer(
                     _consume_record(
                         repository,
                         analysis_service,
+                        defect_detector,
+                        defect_result_repository,
                         analysis_producer,
                         record,
                     )
@@ -148,6 +159,8 @@ def _run_raw_event_consumer(
 def _consume_record(
     repository: SampleDbRepository,
     analysis_service: BottleneckAnalysisService | None,
+    defect_detector: DefectTransferDetector | None,
+    defect_result_repository: DefectTransferPredictionRepository | None,
     analysis_producer: Any | None,
     record: Any,
 ) -> None:
@@ -163,19 +176,27 @@ def _consume_record(
         record,
         row,
     )
+    defect_prediction = _predict_defect_transfer(defect_detector, row)
+    defect_rows_saved = _save_defect_transfer_prediction(
+        defect_result_repository,
+        row,
+        defect_prediction,
+    )
     analysis_published = _publish_bottleneck_analysis_event(
         analysis_producer,
         raw_event,
         row,
         bottleneck_summaries,
+        defect_prediction,
     )
     # 새 raw 이벤트와 자동 분석 결과가 반영되면 Redis 캐시를 비운다.
     _clear_bottleneck_cache()
+    _clear_defect_transfer_cache()
     logger.info(
         "Kafka raw event consumed and stored: topic=%s partition=%s offset=%s "
         "key=%s event_id=%s manufacturing_event_id_source=manufacturing_event_json.id "
         "car_master_id=%s process_code=%s affected_rows=%s "
-        "bottleneck_result_count=%s analysis_topic_published=%s",
+        "bottleneck_result_count=%s defect_result_saved=%s analysis_topic_published=%s",
         record.topic,
         record.partition,
         record.offset,
@@ -185,6 +206,7 @@ def _consume_record(
         row["process_code"],
         affected_rows,
         len(bottleneck_summaries),
+        defect_rows_saved,
         analysis_published,
     )
 
@@ -333,6 +355,33 @@ def _create_bottleneck_analysis_service() -> BottleneckAnalysisService | None:
         return None
 
 
+def _create_defect_transfer_detector() -> DefectTransferDetector | None:
+    try:
+        return DefectTransferDetector()
+    except Exception:
+        logger.exception(
+            "Defect transfer detector is unavailable. "
+            "Raw Kafka events will still be stored.",
+        )
+        return None
+
+
+def _create_defect_transfer_result_repository() -> DefectTransferPredictionRepository | None:
+    if not settings.sample_database_connection_url:
+        return None
+    try:
+        return DefectTransferPredictionRepository(
+            settings.main_database_connection_url,
+            event_database_url=settings.sample_database_connection_url,
+        )
+    except Exception:
+        logger.exception(
+            "Defect transfer result repository is unavailable. "
+            "Raw Kafka events will still be stored.",
+        )
+        return None
+
+
 def _create_analysis_producer(
     producer_cls: Any,
     bootstrap_servers: list[str],
@@ -409,11 +458,17 @@ def _publish_bottleneck_analysis_event(
     raw_event: dict[str, Any],
     row: dict[str, Any],
     summaries: list[dict[str, Any]],
+    defect_prediction: DefectTransferPrediction | None,
 ) -> bool:
     if producer is None:
         return False
 
-    event = _build_bottleneck_analysis_event(raw_event, row, summaries)
+    event = _build_bottleneck_analysis_event(
+        raw_event,
+        row,
+        summaries,
+        defect_prediction,
+    )
     key = str(row["car_master_id"])
     try:
         result = producer.send(ANALYSIS_TOPIC, key=key, value=event).get(timeout=10)
@@ -444,6 +499,7 @@ def _build_bottleneck_analysis_event(
     raw_event: dict[str, Any],
     row: dict[str, Any],
     summaries: list[dict[str, Any]],
+    defect_prediction: DefectTransferPrediction | None = None,
 ) -> dict[str, Any]:
     event_json = row["event_json"]
     equipment = event_json.get("equipment", {})
@@ -476,12 +532,31 @@ def _build_bottleneck_analysis_event(
     overall_risk_score = _risk_score_to_percent(risk_score)
     risk_level = _risk_level(overall_risk_score)
     is_bottleneck = summary is not None and risk_score >= 3
-    defect_probability = _defect_probability(event_json, process_code)
-    transfer_predicted_process = _transfer_predicted_process(
-        process_code,
-        defect_probability,
-    )
-    is_quality_defect = defect_probability >= 0.6
+    if defect_prediction is None:
+        defect_probability = _defect_probability(event_json, process_code)
+        transfer_predicted_process = _transfer_predicted_process(
+            process_code,
+            defect_probability,
+        )
+        transfer_probability = None
+        defect_causes: list[dict[str, Any]] = []
+        is_quality_defect = defect_probability >= 0.6
+    else:
+        defect_probability = defect_prediction.defect_probability
+        transfer_predicted_process = defect_prediction.predicted_process_code
+        transfer_probability = defect_prediction.transfer_probability
+        defect_causes = [
+            {
+                "rank": cause.rank,
+                "feature": cause.feature,
+                "label": cause.label,
+                "value": cause.value,
+                "impact": cause.impact,
+                "message": cause.message,
+            }
+            for cause in defect_prediction.causes
+        ]
+        is_quality_defect = defect_prediction.is_quality_defect
     is_equipment_fault = str(
         equipment_status.get("operationStatus") or "",
     ).upper() in {"FAULT", "STOPPED", "ERROR", "DOWN"}
@@ -582,10 +657,100 @@ def _build_bottleneck_analysis_event(
             "processCode": process_code,
             "bottleneckDelayTime": bottleneck_delay_time,
             "defectProbability": defect_probability,
+            "transferProbability": transfer_probability,
             "transferPredictedProcess": transfer_predicted_process,
+            "defectCauses": defect_causes,
             "riskScore": risk_score,
         },
     }
+
+
+def _predict_defect_transfer(
+    detector: DefectTransferDetector | None,
+    row: dict[str, Any],
+) -> DefectTransferPrediction | None:
+    if detector is None:
+        return None
+    try:
+        return detector.predict_event(row["event_json"], str(row["process_code"]))
+    except Exception:
+        logger.exception(
+            "Failed to run defect transfer prediction: event_id=%s process_code=%s",
+            row.get("event_id"),
+            row.get("process_code"),
+        )
+        return None
+
+
+def _save_defect_transfer_prediction(
+    repository: DefectTransferPredictionRepository | None,
+    row: dict[str, Any],
+    prediction: DefectTransferPrediction | None,
+) -> int:
+    if repository is None or prediction is None:
+        return 0
+    try:
+        causes = [
+            {
+                "message": cause.message,
+                "label": cause.label,
+                "impact": cause.impact,
+            }
+            for cause in prediction.causes
+        ]
+        return repository.replace_prediction_result(
+            event_id=str(row["event_id"]),
+            car_master_id=int(row["car_master_id"]),
+            source_process_code=prediction.current_process_code,
+            target_process_code=prediction.predicted_process_code,
+            current_defect_probability=prediction.defect_probability,
+            target_defect_probability=prediction.transfer_probability,
+            predicted_defect_process=_format_predicted_defect_process(
+                prediction.predicted_process_code,
+                row,
+            ),
+            expected_occurrence_step=prediction.expected_steps_after,
+            risk_grade=prediction.risk_level,
+            causes=causes,
+            predicted_at=datetime.now(),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to save defect transfer prediction result: event_id=%s process_code=%s",
+            row.get("event_id"),
+            row.get("process_code"),
+        )
+        return 0
+
+
+def _format_predicted_defect_process(
+    process_code: str | None,
+    row: dict[str, Any],
+) -> str | None:
+    if process_code is None:
+        return None
+    from app.utils.process_label_utils import (
+        equipment_code_for_car_process,
+        format_process_with_line,
+    )
+
+    source_code = str(row.get("process_code") or "").strip().upper()
+    normalized = str(process_code).strip().upper()
+    if normalized == source_code:
+        equipment_code = _source_equipment_code(row)
+    else:
+        equipment_code = equipment_code_for_car_process(
+            car_master_id=int(row["car_master_id"]),
+            process_code=normalized,
+        )
+    return format_process_with_line(normalized, equipment_code)
+
+
+def _source_equipment_code(row: dict[str, Any]) -> str | None:
+    event_json = row.get("event_json") or {}
+    equipment = event_json.get("equipment", {}) if isinstance(event_json, dict) else {}
+    equipment_code = str(equipment.get("equipmentCode") or row.get("equipment_id") or "")
+    return equipment_code or None
 
 
 def _matching_bottleneck_summary(
@@ -748,3 +913,19 @@ def _clear_bottleneck_cache() -> None:
             redis_client.delete(*keys)
     except Exception:
         logger.exception("Failed to clear bottleneck cache after raw event consumption.")
+
+
+def _clear_defect_transfer_cache() -> None:
+    if not settings.redis_url:
+        return
+
+    try:
+        from redis import Redis
+
+        redis_client = Redis.from_url(settings.redis_connection_url, decode_responses=True)
+        pattern = f"{settings.redis_key_prefix}:process:defect-transfer:*"
+        keys = list(redis_client.scan_iter(match=pattern))
+        if keys:
+            redis_client.delete(*keys)
+    except Exception:
+        logger.exception("Failed to clear defect transfer cache after raw event consumption.")

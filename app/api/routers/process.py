@@ -7,7 +7,7 @@ from app.service.analysis.bottleneck_service import (
 )
 from app.utils.response_utils import success_response
 
-router = APIRouter(prefix="/api/process", tags=["process"])
+router = APIRouter(prefix="/api/ai/process", tags=["process"])
 
 BottleneckAnalysisResponse = CommonResponse[BottleneckAnalysisPage]
 
