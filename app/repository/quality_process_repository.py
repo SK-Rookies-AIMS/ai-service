@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import pandas as pd
 from dotenv import load_dotenv
 import os
@@ -74,28 +74,25 @@ def run():
                 with main_engine.begin() as conn:
 
                     conn.execute(
-                        """
-                        UPDATE inspection_process
-                        SET
-                            completed_count=%s,
-                            waiting_count=%s,
-                            progress_rate=%s,
-                            process_status=%s
-                        WHERE process_name=%s
-                          AND DATE(created_at)=DATE(%s)
-                        """,
-                        (
-                            completed_count,
-                            waiting_count,
-                            progress_rate,
-
-                            "COMPLETE"
-                            if progress_rate == 100
-                            else "RUNNING",
-
-                            process_name,
-                            created_at
-                        )
+                        text("""
+                            UPDATE inspection_process
+                            SET
+                                completed_count=:completed_count,
+                                waiting_count=:waiting_count,
+                                progress_rate=:progress_rate,
+                                process_status=:process_status
+                            WHERE process_name=:process_name
+                            AND DATE(created_at)=DATE(:created_at)
+                        """),
+                        {
+                            "completed_count": completed_count,
+                            "waiting_count": waiting_count,
+                            "progress_rate": progress_rate,
+                            "process_status":
+                                "COMPLETE" if progress_rate == 100 else "RUNNING",
+                            "process_name": process_name,
+                            "created_at": created_at
+                        }
                     )
 
                 print(
