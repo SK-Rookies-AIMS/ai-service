@@ -46,10 +46,11 @@ def run():
                 print("구버전 메시지 무시")
                 continue
 
+            total_vehicle_count = row["total_vehicle_count"]
             process_name = row["process_name"]
             completed_count = row["completed_count"]
             waiting_count = row["waiting_count"]
-            progress_rate = row["completion_rate"]
+            progress_rate = row["progress_rate"]
             created_at = row["created_at"]
 
             # 같은 날짜 + 같은 공정 존재 여부 확인
@@ -110,8 +111,7 @@ def run():
                     "process_name": process_name,
 
                     "total_vehicle_count":
-                        completed_count
-                        + waiting_count,
+                        total_vehicle_count,
 
                     "completed_count":
                         completed_count,
