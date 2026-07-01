@@ -30,6 +30,9 @@ from app.repository.quality_process_repository import (
     run as process_repository
 )
 
+from app.repository.quality_summary_repository import (
+    run as summary_repository
+)
 
 def start_thread(name, target):
 
@@ -126,12 +129,20 @@ if __name__ == "__main__":
         )
     )
 
+    threads.append(
+        start_thread(
+            "Inspection Summary 실시간 집계",
+            summary_repository
+        )
+    )
+
     print("\n실행 중인 서비스")
     print("- Drive Detail Kafka 전송")
     print("- Status Detail Kafka 전송")
     print("- Risk History Kafka 전송")
     print("- Risk Trend Kafka 전송")
     print("- Process Kafka 전송")
+    print("- summary data 전송")
 
     print("- Drive Detail 메시지 처리")
     print("- Status Detail 메시지 처리")

@@ -1,34 +1,23 @@
 from sqlalchemy import create_engine, text
-import pandas as pd
-from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import os
 from urllib.parse import quote_plus
+import os
+import time
+
 
 def run():
+
     load_dotenv()
+
     DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(
-        os.getenv("DB_PASSWORD")
-    )
+    DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD"))
     DB_HOST = os.getenv("DB_HOST")
     DB_PORT = os.getenv("DB_PORT")
     MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
-    SAMPLE_DB_NAME = os.getenv("SAMPLE_DB_NAME")
 
     MAIN_DATABASE_URL = (
         f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
         f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-    )
-
-    SAMPLE_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
-    )
-
-    sample_engine = create_engine(
-        SAMPLE_DATABASE_URL,
-        pool_pre_ping=True
     )
 
     main_engine = create_engine(
@@ -36,164 +25,159 @@ def run():
         pool_pre_ping=True
     )
 
-    inspection_summary_list = []
+    last_total_count = -1
 
-    summary_id = 1
+    while True:
 
-    base_date = datetime.strptime(
-        "2026-06-01",
-        "%Y-%m-%d"
-    )
+        with main_engine.begin() as conn:
 
-    with sample_engine.connect() as conn:
-
-        # 7일
-        for day in range(7):
-
-            current_date = (
-                base_date +
-                timedelta(days=day)
-            )
-
-            offset = day * 100
-
-            vehicles = conn.execute(
+            result = conn.execute(
                 text("""
-                    SELECT vehicle_id
-                    FROM (
-                        SELECT DISTINCT vehicle_id
-                        FROM car_drive
-                        ORDER BY vehicle_id
-                        LIMIT 100 OFFSET :offset
-                    ) t
-                """),
-                {
-                    "offset": offset
-                }
-            ).mappings().all()
+                    SELECT
+                        COUNT(*) AS total_count,
 
-            vehicle_ids = [
-                row["vehicle_id"]
-                for row in vehicles
-            ]
+                        SUM(
+                            CASE
+                                WHEN UPPER(inspection_result) = 'NORMAL'
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS normal_count,
 
-            checkpoints = [
+                        SUM(
+                            CASE
+                                WHEN UPPER(inspection_result) = 'WARNING'
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS abnormal_count,
 
-                (25, "01:00"),
-                (50, "01:15"),
-                (75, "01:30"),
-                (100, "01:45")
+                        MAX(created_at) AS created_at
 
-            ]
+                    FROM inspection_drive_detail
+                """)
+            ).mappings().first()
 
-            for target_count, time_str in checkpoints:
+            total_count = result["total_count"] or 0
 
-                current_vehicle_ids = (
-                    vehicle_ids[:target_count]
+            # 데이터 변화가 없으면 건너뜀
+            if total_count == last_total_count:
+                time.sleep(1)
+                continue
+
+            normal_count = result["normal_count"] or 0
+            abnormal_count = result["abnormal_count"] or 0
+
+            standby_count = max(0, 100 - total_count)
+
+            if total_count == 0:
+                normal_rate = 0
+                abnormal_rate = 0
+            else:
+                normal_rate = round(
+                    normal_count / total_count * 100,
+                    2
                 )
 
-                normal_count = 0
-                abnormal_count = 0
-
-                for vehicle_id in current_vehicle_ids:
-
-                    drive_row = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_drive
-                            WHERE vehicle_id=:vehicle_id
-                            LIMIT 1
-                        """),
-                        {
-                            "vehicle_id": vehicle_id
-                        }
-                    ).mappings().first()
-
-                    if not drive_row:
-                        continue
-
-                    score = 100
-
-                    if float(
-                        drive_row["throttle_position"]
-                    ) > 90:
-                        score -= 20
-
-                    if float(
-                        drive_row["brake_pressure"]
-                    ) > 45:
-                        score -= 20
-
-                    if abs(float(
-                        drive_row["steering_angle"]
-                    )) > 40:
-                        score -= 20
-
-                    if score >= 80:
-                        normal_count += 1
-                    else:
-                        abnormal_count += 1
-
-                total_count = target_count
-
-                standby_count = (
-                    100 - total_count
+                abnormal_rate = round(
+                    abnormal_count / total_count * 100,
+                    2
                 )
 
-                created_at = datetime.strptime(
-                    f"{current_date.strftime('%Y-%m-%d')} {time_str}",
-                    "%Y-%m-%d %H:%M"
+            created_at = result["created_at"]
+
+            # inspection_summary가 비어있는지 확인
+            exists = conn.execute(
+                text("""
+                    SELECT COUNT(*)
+                    FROM inspection_summary
+                """)
+            ).scalar()
+
+            if exists == 0:
+
+                conn.execute(
+                    text("""
+                        INSERT INTO inspection_summary
+                        (
+                            total_count,
+                            normal_count,
+                            normal_rate,
+                            abnormal_count,
+                            abnormal_rate,
+                            standby_count,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES
+                        (
+                            :total_count,
+                            :normal_count,
+                            :normal_rate,
+                            :abnormal_count,
+                            :abnormal_rate,
+                            :standby_count,
+                            :created_at,
+                            NOW()
+                        )
+                    """),
+                    {
+                        "total_count": total_count,
+                        "normal_count": normal_count,
+                        "normal_rate": normal_rate,
+                        "abnormal_count": abnormal_count,
+                        "abnormal_rate": abnormal_rate,
+                        "standby_count": standby_count,
+                        "created_at": created_at
+                    }
                 )
 
-                inspection_summary_list.append({
+                print(
+                    f"[INSERT] "
+                    f"완료:{total_count} "
+                    f"정상:{normal_count} "
+                    f"이상:{abnormal_count} "
+                    f"대기:{standby_count}"
+                )
 
-                    "id": summary_id,
+            else:
 
-                    "total_count": total_count,
+                conn.execute(
+                    text("""
+                        UPDATE inspection_summary
+                        SET
+                            total_count=:total_count,
+                            normal_count=:normal_count,
+                            normal_rate=:normal_rate,
+                            abnormal_count=:abnormal_count,
+                            abnormal_rate=:abnormal_rate,
+                            standby_count=:standby_count,
+                            created_at=:created_at,
+                            updated_at=NOW()
+                    """),
+                    {
+                        "total_count": total_count,
+                        "normal_count": normal_count,
+                        "normal_rate": normal_rate,
+                        "abnormal_count": abnormal_count,
+                        "abnormal_rate": abnormal_rate,
+                        "standby_count": standby_count,
+                        "created_at": created_at
+                    }
+                )
 
-                    "normal_count": normal_count,
+                print(
+                    f"[UPDATE] "
+                    f"완료:{total_count} "
+                    f"정상:{normal_count} "
+                    f"이상:{abnormal_count} "
+                    f"대기:{standby_count}"
+                )
 
-                    "normal_rate":
-                        round(
-                            normal_count /
-                            total_count * 100,
-                            2
-                        ),
+            last_total_count = total_count
 
-                    "abnormal_count":
-                        abnormal_count,
+        time.sleep(1)
 
-                    "abnormal_rate":
-                        round(
-                            abnormal_count /
-                            total_count * 100,
-                            2
-                        ),
-
-                    "stanby_count":
-                        standby_count,
-
-                    "created_at":
-                        created_at
-
-                })
-
-                summary_id += 1
-
-    df = pd.DataFrame(
-        inspection_summary_list
-    )
-
-    df.to_sql(
-        name="inspection_summary",
-        con=main_engine,
-        if_exists="append",
-        index=False
-    )
-
-    print(
-        f"summary table 전송 완료"
-    )
 
 if __name__ == "__main__":
     run()
