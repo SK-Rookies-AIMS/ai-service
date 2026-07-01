@@ -9,6 +9,7 @@ from app.scheduler.quality.status_detail_producer import run as status_producer
 from app.scheduler.quality.risk_history_producer import run as history_producer
 from app.scheduler.quality.risk_trend_producer import run as trend_producer
 from app.scheduler.quality.process_producer import run as process_producer
+from app.scheduler.quality.stomp_client import run as stomp_client
 
 from app.repository.quality_drive_detail_repository import (
     run as drive_repository
@@ -133,6 +134,13 @@ if __name__ == "__main__":
         start_thread(
             "Inspection Summary 실시간 집계",
             summary_repository
+        )
+    )
+
+    threads.append(
+        start_thread(
+            "WebSocket STOMP Listener",
+            stomp_client
         )
     )
 
