@@ -95,11 +95,6 @@ def run():
                         }
                     )
 
-                print(
-                    f"[UPDATE] {process_name} "
-                    f"{progress_rate}%"
-                )
-
             else:
 
                 # INSERT
@@ -133,11 +128,6 @@ def run():
                     con=main_engine,
                     if_exists="append",
                     index=False
-                )
-
-                print(
-                    f"[INSERT] {process_name} "
-                    f"{progress_rate}%"
                 )
 
     except Exception as e:

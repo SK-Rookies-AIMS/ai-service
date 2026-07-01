@@ -57,11 +57,6 @@ def run():
 
             if exists.iloc[0]["cnt"] > 0:
 
-                print(
-                    f"[STATUS] "
-                    f"{vehicle_id} 이미 저장됨"
-                )
-
                 continue
 
             inspection_status_detail = [{
@@ -111,11 +106,6 @@ def run():
                 con=main_engine,
                 if_exists="append",
                 index=False
-            )
-
-            print(
-                f"[STATUS 저장 완료] "
-                f"{vehicle_id}"
             )
 
     except Exception as e:

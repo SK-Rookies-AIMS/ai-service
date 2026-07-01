@@ -86,12 +86,6 @@ def run():
                         }
                     )
 
-                print(
-                    f"[UPDATE] "
-                    f"{inspection_type} "
-                    f"{risk_score}"
-                )
-
             else:
 
                 # inspection_round 자동 생성
@@ -121,13 +115,6 @@ def run():
                     con=main_engine,
                     if_exists="append",
                     index=False
-                )
-
-                print(
-                    f"[INSERT] "
-                    f"{inspection_type} "
-                    f"ROUND {inspection_round} "
-                    f"{risk_score}"
                 )
 
     except Exception as e:
