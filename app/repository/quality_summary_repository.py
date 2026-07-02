@@ -3,7 +3,6 @@ from dotenv import load_dotenv
 from urllib.parse import quote_plus
 import os
 import time
-import requests
 
 
 def run():

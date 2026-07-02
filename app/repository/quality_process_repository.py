@@ -3,7 +3,6 @@ import pandas as pd
 from dotenv import load_dotenv
 import os
 from urllib.parse import quote_plus
-import requests
 
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import QUALITY_INSPECTION_PROCESS
