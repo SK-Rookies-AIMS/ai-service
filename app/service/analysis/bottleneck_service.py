@@ -16,7 +16,7 @@ from app.utils.json_utils import from_json, to_json
 
 
 DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
-BOTTLENECK_CACHE_VERSION = "v8"
+BOTTLENECK_CACHE_VERSION = "v9"
 PROCESS_CODE_LABELS = {
     "PRESS": "프레스",
     "BODY": "차체",
@@ -62,17 +62,17 @@ class BottleneckAnalysisService:
         size = max(1, min(size, 100))
         page = max(cursor or 0, 0)
 
-        saved_count, has_next = self.run_analysis_and_save(cursor=page, size=size)
-
         # 저장소에서 요청 페이지 범위만 조회
         rows = self.repository.list_results(cursor=page, size=size)
-        if saved_count == 0 or not rows:
+        if not rows:
             return BottleneckAnalysisPage(
                 content=[],
                 hasNext=False,
                 nextCursor=None,
             )
 
+        total_count = self.repository.count_results()
+        has_next = total_count > (page + 1) * size
         next_cursor = page + 1 if has_next else None
 
         return BottleneckAnalysisPage(
