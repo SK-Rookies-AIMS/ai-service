@@ -15,7 +15,6 @@ DEFAULT_EQUIPMENT_ROWS: list[dict[str, Any]] = [
         "equipment_name": f"{equipment_name_prefix} {index}호",
         "equipment_type": equipment_type,
         "current_status": "RUNNING",
-        "health_status": "NORMAL",
     }
     for process_code, equipment_type, equipment_name_prefix in (
         ("PRESS", "HYDRAULIC_PRESS", "프레스 유압모터"),
@@ -42,7 +41,6 @@ class EquipmentRepository:
                     process_code=statement.inserted.process_code,
                     equipment_type=statement.inserted.equipment_type,
                     current_status=statement.inserted.current_status,
-                    health_status=statement.inserted.health_status,
                 )
                 conn.execute(statement)
                 return

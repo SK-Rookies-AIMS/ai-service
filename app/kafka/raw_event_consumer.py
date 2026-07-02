@@ -20,9 +20,11 @@ from app.ml.inference.defect_transfer_detector import (
 from app.repository.defect_transfer_prediction_repository import (
     DefectTransferPredictionRepository,
 )
+from app.repository.sampledb_schema import car_master
 from app.repository.sampledb_repository import SampleDbRepository
 from app.service.analysis.bottleneck_service import BottleneckAnalysisService
 from app.utils.datetime_utils import seoul_now_iso
+from app.websocket.analysis_manager import analysis_websocket_manager
 
 
 logger = logging.getLogger(__name__)
@@ -192,6 +194,13 @@ def _consume_record(
     # 새 raw 이벤트와 자동 분석 결과가 반영되면 Redis 캐시를 비운다.
     _clear_bottleneck_cache()
     _clear_defect_transfer_cache()
+    _broadcast_process_analysis_updates(
+        repository,
+        row,
+        bottleneck_summaries,
+        defect_prediction,
+        defect_rows_saved,
+    )
     logger.info(
         "Kafka raw event consumed and stored: topic=%s partition=%s offset=%s "
         "key=%s event_id=%s manufacturing_event_id_source=manufacturing_event_json.id "
@@ -209,6 +218,81 @@ def _consume_record(
         defect_rows_saved,
         analysis_published,
     )
+
+
+def _broadcast_process_analysis_updates(
+    repository: SampleDbRepository,
+    row: dict[str, Any],
+    bottleneck_summaries: list[dict[str, Any]],
+    defect_prediction: DefectTransferPrediction | None,
+    defect_rows_saved: int,
+) -> None:
+    vehicle_id = _vehicle_id_for_car_master_id(repository, int(row["car_master_id"]))
+    base_message = {
+        "eventId": row["event_id"],
+        "carMasterId": row["car_master_id"],
+        "vehicleId": vehicle_id,
+        "processCode": row["process_code"],
+        "updatedAt": seoul_now_iso(),
+    }
+    analysis_websocket_manager.broadcast_from_thread(
+        {
+            **base_message,
+            "type": "BOTTLENECK_UPDATED",
+            "resultCount": len(bottleneck_summaries),
+        },
+    )
+
+    analysis_websocket_manager.broadcast_from_thread(
+        {
+            **base_message,
+            "type": "DEFECT_TRANSFER_UPDATED",
+            "defectProbability": (
+                round(defect_prediction.defect_probability * 100.0, 1)
+                if defect_prediction is not None
+                else None
+            ),
+            "transferProbability": (
+                round(defect_prediction.transfer_probability * 100.0, 1)
+                if defect_prediction is not None
+                and defect_prediction.transfer_probability is not None
+                else None
+            ),
+            "riskGrade": (
+                defect_prediction.risk_level
+                if defect_prediction is not None
+                else None
+            ),
+            "predictedDefectProcess": (
+                _format_predicted_defect_process(
+                    defect_prediction.predicted_process_code,
+                    row,
+                )
+                if defect_prediction is not None
+                else None
+            ),
+            "resultSaved": defect_rows_saved,
+        },
+    )
+
+
+def _vehicle_id_for_car_master_id(
+    repository: SampleDbRepository,
+    car_master_id: int,
+) -> str | None:
+    from sqlalchemy import select
+
+    try:
+        query = select(car_master.c.vehicle_id).where(car_master.c.id == car_master_id)
+        with repository.engine.connect() as conn:
+            value = conn.execute(query).scalar()
+        return str(value) if value is not None else None
+    except Exception:
+        logger.exception(
+            "Failed to resolve vehicle_id for websocket update: car_master_id=%s",
+            car_master_id,
+        )
+        return None
 
 
 def _parse_raw_event(record: Any) -> dict[str, Any]:
@@ -687,7 +771,21 @@ def _save_defect_transfer_prediction(
     row: dict[str, Any],
     prediction: DefectTransferPrediction | None,
 ) -> int:
-    if repository is None or prediction is None:
+    if repository is None:
+        logger.warning(
+            "Defect transfer prediction was not saved because result repository is unavailable: "
+            "event_id=%s process_code=%s",
+            row.get("event_id"),
+            row.get("process_code"),
+        )
+        return 0
+    if prediction is None:
+        logger.warning(
+            "Defect transfer prediction was not saved because prediction is unavailable: "
+            "event_id=%s process_code=%s",
+            row.get("event_id"),
+            row.get("process_code"),
+        )
         return 0
     try:
         causes = [

@@ -28,7 +28,6 @@ equipment_current_status_enum = Enum(
     "FAULT",
     "MAINTENANCE",
 )
-equipment_health_status_enum = Enum("NORMAL", "WARNING", "CRITICAL")
 dispatch_status_enum = Enum(
     "PENDING",
     "READY",
@@ -64,12 +63,6 @@ equipment = Table(
         equipment_current_status_enum,
         nullable=False,
         server_default="RUNNING",
-    ),
-    Column(
-        "health_status",
-        equipment_health_status_enum,
-        nullable=False,
-        server_default="NORMAL",
     ),
     Column("last_fault_time", DateTime),
     Column("last_recovered_time", DateTime),

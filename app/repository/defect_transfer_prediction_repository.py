@@ -74,12 +74,11 @@ class DefectTransferPredictionRepository:
             )
 
         with self.engine.begin() as conn:
-            if manufacturing_event_id is not None:
-                conn.execute(
-                    self.table.delete().where(
-                        self.table.c.manufacturing_event_id == manufacturing_event_id,
-                    ),
-                )
+            conn.execute(
+                self.table.delete().where(
+                    self.table.c.car_master_id == car_master_id,
+                ),
+            )
             if self.engine.dialect.name != "mysql":
                 from sqlalchemy import func, select
 
@@ -156,6 +155,89 @@ class DefectTransferPredictionRepository:
         page = latest_rows[offset : offset + size]
         return latest_rows[0], page, len(latest_rows) > offset + size
 
+    def diagnostics(self) -> dict[str, Any]:
+        from sqlalchemy import distinct, func, select
+
+        with self.event_engine.connect() as conn:
+            source_event_count = int(
+                conn.execute(select(func.count()).select_from(manufacturing_event_json)).scalar()
+                or 0,
+            )
+            sent_event_count = int(
+                conn.execute(
+                    select(func.count())
+                    .select_from(manufacturing_event_json)
+                    .where(manufacturing_event_json.c.is_sent.is_(True)),
+                ).scalar()
+                or 0,
+            )
+            latest_source_event = conn.execute(
+                select(
+                    manufacturing_event_json.c.id,
+                    manufacturing_event_json.c.event_id,
+                    manufacturing_event_json.c.car_master_id,
+                    manufacturing_event_json.c.process_code,
+                    manufacturing_event_json.c.is_sent,
+                    manufacturing_event_json.c.created_at,
+                ).order_by(manufacturing_event_json.c.id.desc()),
+            ).mappings().first()
+
+        all_rows = self._all_prediction_rows()
+        latest_by_car: dict[int, dict[str, Any]] = {}
+        for row in all_rows:
+            car_id = int(row["car_master_id"])
+            if car_id not in latest_by_car:
+                latest_by_car[car_id] = row
+
+        visible_latest_rows = [
+            row
+            for row in latest_by_car.values()
+            if self._result_probability_percent(row) > 0
+        ]
+
+        with self.engine.connect() as conn:
+            result_count = int(
+                conn.execute(select(func.count()).select_from(self.table)).scalar() or 0,
+            )
+            result_car_count = int(
+                conn.execute(
+                    select(func.count(distinct(self.table.c.car_master_id))),
+                ).scalar()
+                or 0,
+            )
+            null_event_link_count = int(
+                conn.execute(
+                    select(func.count())
+                    .select_from(self.table)
+                    .where(self.table.c.manufacturing_event_id.is_(None)),
+                ).scalar()
+                or 0,
+            )
+            latest_prediction = conn.execute(
+                select(
+                    self.table.c.id,
+                    self.table.c.manufacturing_event_id,
+                    self.table.c.car_master_id,
+                    self.table.c.source_process_code,
+                    self.table.c.target_process_code,
+                    self.table.c.current_defect_probability,
+                    self.table.c.target_defect_probability,
+                    self.table.c.risk_grade,
+                    self.table.c.predicted_at,
+                ).order_by(self.table.c.predicted_at.desc(), self.table.c.id.desc()),
+            ).mappings().first()
+
+        return {
+            "sourceEventCount": source_event_count,
+            "sentSourceEventCount": sent_event_count,
+            "predictionResultRowCount": result_count,
+            "predictionResultCarCount": result_car_count,
+            "visiblePredictionCarCount": len(visible_latest_rows),
+            "nullManufacturingEventLinkCount": null_event_link_count,
+            "latestSourceEvent": self._json_ready_row(latest_source_event),
+            "latestPredictionResult": self._json_ready_row(latest_prediction),
+        }
+
     def _all_prediction_rows(
         self,
         *,
@@ -172,6 +254,15 @@ class DefectTransferPredictionRepository:
         )
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(query).mappings()]
+
+    @staticmethod
+    def _json_ready_row(row: Any | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in dict(row).items()
+        }
 
     def _manufacturing_event_id(self, event_id: str) -> int | None:
         from sqlalchemy import select
@@ -280,6 +371,13 @@ class DefectTransferPredictionRepository:
             )
 
             car_id = int(row["car_master_id"])
+            source_code = str(row.get("source_process_code") or "").strip().upper()
+            if not row["source_equipment_code"] and source_code:
+                row["source_equipment_code"] = equipment_code_for_car_process(
+                    car_master_id=car_id,
+                    process_code=source_code,
+                )
+
             target_code = self._target_process_code(row)
             if target_code:
                 row["target_equipment_code"] = target_equipment_by_key.get(

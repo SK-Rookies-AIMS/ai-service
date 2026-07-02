@@ -20,7 +20,6 @@ class SampleDbSchemaManager:
     def _migrate_prd_columns(self) -> None:
         equipment_columns = {
             "current_status": "VARCHAR(20) NOT NULL DEFAULT 'RUNNING'",
-            "health_status": "VARCHAR(20) NOT NULL DEFAULT 'NORMAL'",
             "last_fault_time": "DATETIME NULL",
             "last_recovered_time": "DATETIME NULL",
             "reason": "VARCHAR(255) NULL",
@@ -67,11 +66,6 @@ class SampleDbSchemaManager:
                 "ALTER TABLE equipment MODIFY COLUMN current_status "
                 "ENUM('RUNNING','IDLE','STOPPED','FAULT','MAINTENANCE') "
                 "NOT NULL DEFAULT 'RUNNING'",
-            )
-        if equipment_types.get("health_status") != "ENUM":
-            statements.append(
-                "ALTER TABLE equipment MODIFY COLUMN health_status "
-                "ENUM('NORMAL','WARNING','CRITICAL') NOT NULL DEFAULT 'NORMAL'",
             )
         if statements:
             with self.engine.begin() as conn:
