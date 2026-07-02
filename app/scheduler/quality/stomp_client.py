@@ -10,8 +10,8 @@ def run():
     class AIListener(stomp.ConnectionListener):
 
         def on_message(self, frame):
-            data = json.loads(frame.body)
-            print("📩 수신 데이터:", data)
+            #data = json.loads(frame.body)
+            #print("📩 수신 데이터:", data)
 
             # 👉 여기서 AI 로직 실행
             # risk_score 계산, anomaly detection 등
