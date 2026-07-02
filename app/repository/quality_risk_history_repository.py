@@ -119,8 +119,7 @@ def run():
 
     except Exception as e:
 
-        import traceback
-        traceback.print_exc()
+        print(f"오류 발생 : {e}")
 
     finally:
 

@@ -132,14 +132,6 @@ def run():
                     }
                 )
 
-                print(
-                    f"[INSERT] "
-                    f"완료:{total_count} "
-                    f"정상:{normal_count} "
-                    f"이상:{abnormal_count} "
-                    f"대기:{standby_count}"
-                )
-
             else:
 
                 conn.execute(
@@ -164,14 +156,6 @@ def run():
                         "standby_count": standby_count,
                         "created_at": created_at
                     }
-                )
-
-                print(
-                    f"[UPDATE] "
-                    f"완료:{total_count} "
-                    f"정상:{normal_count} "
-                    f"이상:{abnormal_count} "
-                    f"대기:{standby_count}"
                 )
 
             last_total_count = total_count
