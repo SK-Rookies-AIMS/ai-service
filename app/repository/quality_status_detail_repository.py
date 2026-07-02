@@ -112,9 +112,7 @@ def run():
 
     except Exception as e:
 
-        print(
-            f"[STATUS ERROR] {e}"
-        )
+        print(f"오류 발생 : {e}")
 
     finally:
 
