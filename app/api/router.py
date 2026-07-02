@@ -6,6 +6,7 @@ from app.api.routers import (
     manufacturing_event,
     ml_dataset,
     process,
+    process_analysis_ws,
     root,
 )
 
@@ -14,5 +15,6 @@ api_router.include_router(root.router)
 api_router.include_router(health.router)
 api_router.include_router(process.router)
 api_router.include_router(defect_transfer.router)
+api_router.include_router(process_analysis_ws.router)
 api_router.include_router(manufacturing_event.router)
 api_router.include_router(ml_dataset.router)

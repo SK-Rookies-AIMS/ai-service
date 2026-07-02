@@ -20,8 +20,7 @@ from app.repository.defect_transfer_prediction_repository import (
 from app.utils.json_utils import from_json, to_json
 from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
 
-
-DEFECT_TRANSFER_CACHE_VERSION = "v4"
+DEFECT_TRANSFER_CACHE_VERSION = "v5"
 
 
 class DefectTransferAnalysisService:
@@ -54,7 +53,11 @@ class DefectTransferAnalysisService:
         cache_key = self._prediction_cache_key(cursor=cursor, size=size)
         cached_value = self._cache_get(cache_key)
         if cached_value:
-            return DefectTransferPredictionPage.model_validate(from_json(cached_value))
+            cached_page = DefectTransferPredictionPage.model_validate(
+                from_json(cached_value),
+            )
+            if cached_page.content:
+                return cached_page
 
         page = self.get_predictions(cursor=cursor, size=size)
         self._cache_set(cache_key, page.model_dump(by_alias=False))
@@ -74,7 +77,9 @@ class DefectTransferAnalysisService:
         )
         cached_value = self._cache_get(cache_key)
         if cached_value:
-            return DefectTransferCausePage.model_validate(from_json(cached_value))
+            cached_page = DefectTransferCausePage.model_validate(from_json(cached_value))
+            if cached_page.content:
+                return cached_page
 
         page = self.get_cause_analysis(
             vehicle_id=vehicle_id,
@@ -83,6 +88,22 @@ class DefectTransferAnalysisService:
         )
         self._cache_set(cache_key, page.model_dump(by_alias=False))
         return page
+
+    def clear_cache(self) -> None:
+        if not settings.redis_url:
+            return
+        try:
+            redis_client = self._redis()
+            pattern = f"{settings.redis_key_prefix}:process:defect-transfer:*"
+            keys = list(redis_client.scan_iter(match=pattern))
+            if keys:
+                redis_client.delete(*keys)
+        except Exception as exc:
+            self._redis_client = None
+            raise AppException(
+                "불량 전이 예측 Redis 캐시 삭제에 실패했습니다.",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ) from exc
 
     def get_predictions(
         self,
@@ -105,6 +126,34 @@ class DefectTransferAnalysisService:
             hasNext=has_next,
             nextCursor=page + 1 if has_next else None,
         )
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        try:
+            diagnostics = self.repository.diagnostics()
+        except SQLAlchemyError as exc:
+            raise self._db_exception() from exc
+
+        if diagnostics["sourceEventCount"] == 0:
+            status_text = "NO_SOURCE_EVENTS"
+            message = "sampledb.manufacturing_event_json에 원천 이벤트가 없습니다."
+        elif diagnostics["sentSourceEventCount"] == 0:
+            status_text = "NO_SENT_SOURCE_EVENTS"
+            message = "원천 이벤트는 있지만 is_sent=true 이벤트가 없습니다."
+        elif diagnostics["predictionResultRowCount"] == 0:
+            status_text = "NO_PREDICTION_RESULTS"
+            message = "원천 이벤트는 있지만 예측 결과 테이블에 저장된 행이 없습니다."
+        elif diagnostics["visiblePredictionCarCount"] == 0:
+            status_text = "NO_VISIBLE_PREDICTIONS"
+            message = "예측 결과는 저장됐지만 화면 목록 필터를 통과하는 차량이 없습니다."
+        else:
+            status_text = "OK"
+            message = "화면에 표시 가능한 불량 전이 예측 데이터가 있습니다."
+
+        return {
+            **diagnostics,
+            "status": status_text,
+            "message": message,
+        }
 
     def get_cause_analysis(
         self,
@@ -203,6 +252,11 @@ class DefectTransferAnalysisService:
     def _resolve_predicted_defect_process(cls, row: dict[str, Any]) -> str | None:
         if cls._result_probability(row) <= 0:
             return None
+
+        # Return the database column value if available
+        db_val = row.get("predicted_defect_process")
+        if db_val:
+            return db_val
 
         source_code = str(row.get("source_process_code") or "").strip().upper()
         if row.get("target_defect_probability") is not None:

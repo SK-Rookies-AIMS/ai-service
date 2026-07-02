@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query
 
 from app.dto.response import CommonResponse
@@ -16,6 +18,7 @@ router = APIRouter(prefix="/api/ai/process/defect-transfer", tags=["process"])
 
 DefectTransferPredictionResponse = CommonResponse[DefectTransferPredictionPage]
 DefectTransferCauseResponse = CommonResponse[DefectTransferCausePage]
+DefectTransferDiagnosticsResponse = CommonResponse[dict[str, Any]]
 
 
 @router.get(
@@ -44,6 +47,22 @@ def get_defect_transfer_predictions(
     return success_response(
         data=service.get_cached_predictions(cursor=cursor, size=size),
         message="불량 전이 예측 목록 조회가 완료되었습니다.",
+    )
+
+
+@router.get(
+    "/diagnostics",
+    response_model=DefectTransferDiagnosticsResponse,
+    summary="불량 전이 예측 데이터 저장/조회 상태 진단",
+)
+def get_defect_transfer_diagnostics(
+    service: DefectTransferAnalysisService = Depends(
+        get_defect_transfer_analysis_service,
+    ),
+) -> DefectTransferDiagnosticsResponse:
+    return success_response(
+        data=service.get_diagnostics(),
+        message="불량 전이 예측 데이터 진단이 완료되었습니다.",
     )
 
 
