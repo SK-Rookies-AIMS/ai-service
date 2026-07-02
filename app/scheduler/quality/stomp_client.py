@@ -7,9 +7,9 @@ def run():
     load_dotenv()
     QUALITY_URL = os.getenv("QUALITY_URL")
 
-    class AIListener(stomp.ConnectionListener):
+    #class AIListener(stomp.ConnectionListener):
 
-        def on_message(self, frame):
+        #def on_message(self, frame):
             #data = json.loads(frame.body)
             #print("📩 수신 데이터:", data)
 
@@ -19,7 +19,7 @@ def run():
 
     conn = stomp.Connection([(QUALITY_URL, 8083)])
 
-    conn.set_listener('', AIListener())
+    #conn.set_listener('', AIListener())
 
     conn.connect(wait=True)
 
