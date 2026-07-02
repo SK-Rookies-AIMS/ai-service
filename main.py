@@ -125,7 +125,7 @@ if __name__ == "__main__":
     # =====================
     # STOMP
     # =====================
-    threads.append(start_thread("STOMP Client", stomp_client))
+    #threads.append(start_thread("STOMP Client", stomp_client))
 
     print("\n📡 서비스 실행 중... (Ctrl+C로 종료)")
 
