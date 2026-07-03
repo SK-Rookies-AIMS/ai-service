@@ -33,7 +33,7 @@ PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
 # assembly-service의 app.kafka.topics.raw.name과 동일한 실제 raw 토픽명.
 RAW_TOPIC = "factory.manufacturing.raw"
 ANALYSIS_TOPIC = "factory.manufacturing.analysis"
-RAW_CONSUMER_GROUP_ID = "ai-consumer-group"
+RAW_CONSUMER_GROUP_ID = "ai-analysis-consumer-group"
 RAW_AUTO_OFFSET_RESET = "earliest"
 RAW_CONSUMER_CONCURRENCY = 2
 _bottleneck_analysis_lock = Lock()
