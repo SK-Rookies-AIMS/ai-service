@@ -8,9 +8,18 @@ python-dotenv>=1.0.1,<2.0.0
 sqlalchemy>=2.0.36,<3.0.0
 pymysql>=1.1.1,<2.0.0
 
-# LLM & External API
+# LLM & LangChain
 httpx>=0.28.0
 openai>=1.59.0,<2.0.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+tiktoken>=0.8.0
+
+# Vector Store (RAG)
+opensearch-py>=2.7.0
+faiss-cpu>=1.9.0
 
 # Kafka
 aiokafka>=0.12.0
