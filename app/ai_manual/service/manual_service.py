@@ -3,27 +3,25 @@
 import os
 
 from dotenv import load_dotenv
-
 from langchain_openai import ChatOpenAI
 
-from ai_manual.prompt.prompt_template import manual_prompt
+from app.ai_manual.prompt.prompt_template import manual_prompt
+from app.ai_manual.rag.vector_store import VectorStore
 
-from ai_manual.rag.vector_store import VectorStore
-
-from ai_manual.repository.alert_event_repository import (
+from app.ai_manual.repository.alert_event_repository import (
     AlertEventRepository
 )
 
-from ai_manual.schema.request import (
+from app.ai_manual.schema.request import (
     CriticalEvent,
     EquipmentInfo,
     FactoryContext,
     ManualRequest,
     OperatorInfo,
-    RagContext
+    RagContext,
 )
 
-from ai_manual.schema.response import ManualResponse
+from app.ai_manual.schema.response import ManualResponse
 
 
 class ManualService:

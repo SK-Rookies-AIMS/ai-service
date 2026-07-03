@@ -2,7 +2,7 @@
 
 from typing import List
 
-from ai_manual.schema.request import CriticalEvent
+from app.ai_manual.schema.request import CriticalEvent
 
 
 class VectorStore:
