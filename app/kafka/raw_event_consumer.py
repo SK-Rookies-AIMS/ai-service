@@ -913,7 +913,11 @@ def _defect_probability(event_json: dict[str, Any], process_code: str) -> float:
             + _safe_float(assembly.get("missingPartCount"), default=0.0)
             + _safe_float(assembly.get("fasteningErrorCount"), default=0.0)
         )
-        return round(min(error_count / 3.0, 1.0), 4)
+        if error_count == 0:
+            return 0.0
+        # 에러 건수당 불량 확률을 현실적으로 조정 (너무 쉽게 1.0(100%)이 되지 않도록 함)
+        # 에러 1건당 약 8%씩 추가되며, 기본 50%의 위험도를 갖게 하여 최대 98% 내외로 산출
+        return round(min(error_count * 0.08 + 0.50, 0.98), 4)
 
     vibration_score = max(
         _safe_float(vibration.get("vibrationScore"), default=0.0),
