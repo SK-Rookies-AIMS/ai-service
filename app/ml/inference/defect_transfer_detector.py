@@ -12,7 +12,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-DEFECT_ARTIFACT_DIR = Path("app/ml/artifacts/defect")
+DEFECT_ARTIFACT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "defect"
 PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
 NEXT_PROCESS = {
     "PRESS": "BODY",

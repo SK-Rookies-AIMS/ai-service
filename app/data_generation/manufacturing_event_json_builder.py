@@ -322,6 +322,16 @@ class ManufacturingEventJsonBuilder:
         is_abnormal: bool,
         equipment_map: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
+        # 사용자의 요청에 따라 PRESS는 이상 빈도를 낮추고 PAINT, ASSEMBLY는 높인다.
+        # global_index를 활용해 결정론적(deterministic) 난수를 생성한다.
+        if is_abnormal:
+            if process_code == "PRESS":
+                # PRESS는 원래 이상의 20%만 유지
+                is_abnormal = (global_index % 10) < 2
+            elif process_code in {"PAINT", "ASSEMBLY"}:
+                # PAINT, ASSEMBLY는 원래 이상의 80%를 유지 (빈도 높임)
+                is_abnormal = (global_index % 10) < 8
+
         meta = PROCESS_META[process_code]
         # 같은 차량도 공정마다 서로 다른 설비를 사용할 수 있도록 차량 PK와
         # 공정 코드를 함께 사용해 1~5호기를 독립적으로 배정한다.
@@ -352,6 +362,7 @@ class ManufacturingEventJsonBuilder:
         self._apply_detection_profile(
             process_code=process_code,
             is_abnormal=is_abnormal,
+            global_index=global_index,
             current=current,
             ford=ford,
             vision=vision,
@@ -423,6 +434,7 @@ class ManufacturingEventJsonBuilder:
         *,
         process_code: str,
         is_abnormal: bool,
+        global_index: int,
         current: dict[str, Any],
         ford: dict[str, Any],
         vision: dict[str, Any],
@@ -438,75 +450,100 @@ class ManufacturingEventJsonBuilder:
         target = float(PROCESS_META[process_code]["targetCycleTimeSec"])
         if is_abnormal:
             # 설비 위험 및 불량 전이 위험을 높이는 공통 센서 프로필.
+            # 기존에는 고정값만 넣어 상세 테이블 값이 반복 저장될 수 있었으므로,
+            # global_index 기반 deterministic variation을 더해 재생성 결과는 유지하면서
+            # 이벤트별 수치는 다양하게 만든다.
+            current_variation = global_index % 11
+            vibration_variation = global_index % 13
+            paint_variation = global_index % 10
+            metric_variation = global_index % 8
+
+            rms_ampere = 3.8 + current_variation * 0.13
+            acceleration_g = 0.065 + current_variation * 0.004
+            vibration_score = min(0.99, 0.72 + vibration_variation * 0.018)
+            vibration_rms = 2.35 + vibration_variation * 0.075
+            vibration_peak = 3.55 + vibration_variation * 0.095
+            cycle_time = target + 12.0 + metric_variation * 1.4
+            station_delay = cycle_time - target
+
             current.update(
-                rmsAmpere=4.2,
-                maxAmpere=4.8,
-                minAmpere=3.7,
-                accelerationG=0.085,
+                rmsAmpere=round(rms_ampere, 3),
+                maxAmpere=round(rms_ampere + 0.45 + current_variation * 0.025, 3),
+                minAmpere=round(max(0.0, rms_ampere - 0.35), 3),
+                accelerationG=round(acceleration_g, 4),
             )
             ford.update(
                 label=-1,
-                vibrationScore=0.90,
-                vibrationRms=2.88,
-                vibrationPeak=4.10,
+                vibrationScore=round(vibration_score, 4),
+                vibrationRms=round(vibration_rms, 3),
+                vibrationPeak=round(vibration_peak, 3),
             )
             vision.update(
                 label=1,
-                avgTemperature=54.0,
-                maxTemperature=62.0,
-                minTemperature=45.0,
-                thermalStdTemp=6.0,
-                defectScore=0.90,
-                thicknessValue=132.0,
-                surfaceQualityScore=60.0,
+                avgTemperature=round(50.0 + paint_variation * 0.8, 3),
+                maxTemperature=round(58.0 + paint_variation * 0.9, 3),
+                minTemperature=round(42.0 + paint_variation * 0.5, 3),
+                thermalStdTemp=round(4.5 + paint_variation * 0.25, 3),
+                defectScore=round(min(0.99, 0.65 + paint_variation * 0.025), 4),
+                thicknessValue=round(124.0 + paint_variation * 1.3, 3),
+                surfaceQualityScore=round(max(0.0, 72.0 - paint_variation * 1.8), 3),
             )
             bosch["response"] = 1
             # 병목 위험도도 함께 높아지도록 지연, WIP, 유휴 시간을 보정한다.
             process_metrics.update(
-                cycleTimeSec=target + 16.0,
-                waitingTimeSec=18.0,
-                processingTimeSec=target - 2.0,
-                stationDelaySec=16.0,
-                throughputPerMin=round(60 / (target + 16.0), 3),
-                queueLength=14,
-                wipCount=38,
-                equipmentIdleTimeSec=22.0,
+                cycleTimeSec=round(cycle_time, 3),
+                waitingTimeSec=round(14.0 + metric_variation * 1.1, 3),
+                processingTimeSec=round(max(1.0, target - 4.0 + metric_variation * 0.4), 3),
+                stationDelaySec=round(station_delay, 3),
+                throughputPerMin=round(60 / cycle_time, 3),
+                queueLength=10 + metric_variation,
+                wipCount=30 + metric_variation * 2,
+                equipmentIdleTimeSec=round(18.0 + metric_variation * 1.7, 3),
             )
             return
 
         # 정상 프로필은 PRD 기준 cycle time과 낮은 센서 위험도를 사용한다.
+        # 정상 데이터도 완전 고정값이 아니라 작은 범위에서 흔들리게 한다.
+        current_variation = global_index % 9
+        vibration_variation = global_index % 7
+        paint_variation = global_index % 8
+        metric_variation = global_index % 6
+
+        rms_ampere = 1.55 + current_variation * 0.035
+        cycle_time = target + metric_variation * 0.25
+
         current.update(
-            rmsAmpere=1.7,
-            maxAmpere=1.9,
-            minAmpere=1.5,
-            accelerationG=0.006,
+            rmsAmpere=round(rms_ampere, 3),
+            maxAmpere=round(rms_ampere + 0.18 + current_variation * 0.01, 3),
+            minAmpere=round(max(0.0, rms_ampere - 0.16), 3),
+            accelerationG=round(0.004 + current_variation * 0.0007, 5),
         )
         ford.update(
             label=1,
-            vibrationScore=0.12,
-            vibrationRms=0.32,
-            vibrationPeak=0.58,
+            vibrationScore=round(0.08 + vibration_variation * 0.015, 4),
+            vibrationRms=round(0.22 + vibration_variation * 0.035, 3),
+            vibrationPeak=round(0.42 + vibration_variation * 0.045, 3),
         )
         vision.update(
             label=0,
-            avgTemperature=39.0,
-            maxTemperature=41.0,
-            minTemperature=37.0,
-            thermalStdTemp=0.8,
-            defectScore=0.08,
-            thicknessValue=116.0,
-            surfaceQualityScore=97.0,
+            avgTemperature=round(37.8 + paint_variation * 0.25, 3),
+            maxTemperature=round(40.0 + paint_variation * 0.22, 3),
+            minTemperature=round(36.5 + paint_variation * 0.18, 3),
+            thermalStdTemp=round(0.55 + paint_variation * 0.06, 3),
+            defectScore=round(0.03 + paint_variation * 0.007, 4),
+            thicknessValue=round(113.0 + paint_variation * 0.45, 3),
+            surfaceQualityScore=round(98.5 - paint_variation * 0.3, 3),
         )
         bosch["response"] = 0
         process_metrics.update(
-            cycleTimeSec=target,
-            waitingTimeSec=2.0,
-            processingTimeSec=target - 2.0,
-            stationDelaySec=0.0,
-            throughputPerMin=round(60 / target, 3),
-            queueLength=1,
-            wipCount=4,
-            equipmentIdleTimeSec=0.0,
+            cycleTimeSec=round(cycle_time, 3),
+            waitingTimeSec=round(1.5 + metric_variation * 0.25, 3),
+            processingTimeSec=round(max(1.0, target - 2.5 + metric_variation * 0.15), 3),
+            stationDelaySec=round(max(0.0, cycle_time - target), 3),
+            throughputPerMin=round(60 / cycle_time, 3),
+            queueLength=1 + metric_variation % 3,
+            wipCount=3 + metric_variation,
+            equipmentIdleTimeSec=round(metric_variation * 0.2, 3),
         )
 
     def _forming_row(self, index: int) -> dict[str, Any]:
@@ -759,6 +796,11 @@ class ManufacturingEventJsonBuilder:
                 expected_steps[1],
                 expected_steps[3],
             ]
+            assembly_variation = car_master_id % 4
+            missing_part_count = (assembly_variation % 3) if has_sequence_error else 0
+            fastening_error_count = (1 + assembly_variation) if has_sequence_error else 0
+            sequence_error_count = (1 + (assembly_variation % 2)) if has_sequence_error else 0
+
             return {
                 "assembly": {
                     "expectedSequence": expected_sequence,
@@ -767,13 +809,9 @@ class ManufacturingEventJsonBuilder:
                         if has_sequence_error
                         else expected_sequence
                     ),
-                    "missingPartCount": (
-                        1
-                        if has_sequence_error and current["rmsAmpere"] > 2.3
-                        else 0
-                    ),
-                    "fasteningErrorCount": 1 if has_sequence_error else 0,
-                    "sequenceErrorCount": 1 if has_sequence_error else 0,
+                    "missingPartCount": missing_part_count,
+                    "fasteningErrorCount": fastening_error_count,
+                    "sequenceErrorCount": sequence_error_count,
                 },
             }
         raise ValueError(f"지원하지 않는 process_code입니다: {process_code}")
@@ -1063,7 +1101,7 @@ def _equipment_status_for_event(
     process_code: str,
     is_abnormal: bool,
 ) -> dict[str, str]:
-    """Java enum 기준 운전 상태를 8:2 비율로 결정적 선택한다."""
+    """Java enum 기준 운전 상태를 조정하여 장비 이상(STOPPED/FAULT)을 줄인다."""
     _ = is_abnormal
     digest = hashlib.blake2b(
         f"{car_master_id}:{process_code}:status".encode("utf-8"),
@@ -1071,11 +1109,11 @@ def _equipment_status_for_event(
     ).digest()
     ratio = int.from_bytes(digest, "big") % 100
 
-    if ratio < 70:
+    if ratio < 85:
         operation_status = "RUNNING"
-    elif ratio < 80:
+    elif ratio < 95:
         operation_status = "WARNING"
-    elif ratio < 90:
+    elif ratio < 98:
         operation_status = "STOPPED"
     else:
         operation_status = "FAULT"
