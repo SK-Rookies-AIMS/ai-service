@@ -1,4 +1,4 @@
-# app/main.py
+# app/worker_main.py
 
 import threading
 import time
