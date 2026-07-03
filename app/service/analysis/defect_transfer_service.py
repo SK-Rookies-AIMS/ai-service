@@ -20,7 +20,7 @@ from app.repository.defect_transfer_prediction_repository import (
 from app.utils.json_utils import from_json, to_json
 from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
 
-DEFECT_TRANSFER_CACHE_VERSION = "v6"
+DEFECT_TRANSFER_CACHE_VERSION = "v7"
 
 
 class DefectTransferAnalysisService:
@@ -209,7 +209,7 @@ class DefectTransferAnalysisService:
                     rank=index,
                     feature="main_cause",
                     label=str(row.get("main_cause") or ""),
-                    value=self._display_value(row.get("influence_score")),
+                    value="",
                     impact=float(row.get("influence_score") or 0.0),
                     message=str(row.get("main_cause") or ""),
                 )
