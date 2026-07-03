@@ -134,12 +134,6 @@ Windows에서 Python 3.14를 사용하는 경우 일부 패키지의 사전 빌�
 개발 서버 실행:
 
 ```powershell
-uvicorn main:app --reload
-```
-
-또는 패키지 경로를 직접 지정해 실행할 수 있습니다.
-
-```powershell
 uvicorn app.main:app --reload
 ```
 
