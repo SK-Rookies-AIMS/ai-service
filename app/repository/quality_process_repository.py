@@ -1,35 +1,13 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 import pandas as pd
-from dotenv import load_dotenv
-import os
-from urllib.parse import quote_plus
 
+from app.db import main_engine
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import QUALITY_INSPECTION_PROCESS
 from app.kafka.options import PROCESS_GROUP
 
 
-def run():
-
-    load_dotenv()
-
-    DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(
-        os.getenv("DB_PASSWORD")
-    )
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-    MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
-
-    MAIN_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-    )
-
-    main_engine = create_engine(
-        MAIN_DATABASE_URL,
-        pool_pre_ping=True
-    )
+def run(stop_event):
 
     consumer = create_consumer(
         topic=QUALITY_INSPECTION_PROCESS,
@@ -38,106 +16,106 @@ def run():
 
     try:
 
-        for msg in consumer:
+        while not stop_event.is_set():
 
-            row = msg.value
+            # 1초마다 종료 여부 확인
+            records = consumer.poll(timeout_ms=1000)
 
-            if "process_name" not in row:
-                print("구버전 메시지 무시")
+            if not records:
                 continue
 
-            total_vehicle_count = row["total_vehicle_count"]
-            process_name = row["process_name"]
-            completed_count = row["completed_count"]
-            waiting_count = row["waiting_count"]
-            progress_rate = row["progress_rate"]
-            created_at = row["created_at"]
+            for _, messages in records.items():
 
-            # 같은 날짜 + 같은 공정 존재 여부 확인
-            exists = pd.read_sql(
-                text("""
-                    SELECT COUNT(*) AS cnt
-                    FROM inspection_process
-                    WHERE process_name = :process_name
-                    AND DATE(created_at) = DATE(:created_at)
-                """),
-                con=main_engine,
-                params={
-                    "process_name": process_name,
-                    "created_at": created_at
-                }
-            )
+                for msg in messages:
 
-            if exists.iloc[0]["cnt"] > 0:
+                    row = msg.value
 
-                # UPDATE
-                with main_engine.begin() as conn:
+                    if "process_name" not in row:
+                        print("구버전 메시지 무시")
+                        continue
 
-                    conn.execute(
+                    total_vehicle_count = row["total_vehicle_count"]
+                    process_name = row["process_name"]
+                    completed_count = row["completed_count"]
+                    waiting_count = row["waiting_count"]
+                    progress_rate = row["progress_rate"]
+                    created_at = row["created_at"]
+
+                    # 같은 날짜 + 같은 공정 존재 여부 확인
+                    exists = pd.read_sql(
                         text("""
-                            UPDATE inspection_process
-                            SET
-                                completed_count=:completed_count,
-                                waiting_count=:waiting_count,
-                                progress_rate=:progress_rate,
-                                process_status=:process_status
-                            WHERE process_name=:process_name
-                            AND DATE(created_at)=DATE(:created_at)
+                            SELECT COUNT(*) AS cnt
+                            FROM inspection_process
+                            WHERE process_name = :process_name
+                            AND DATE(created_at) = DATE(:created_at)
                         """),
-                        {
-                            "completed_count": completed_count,
-                            "waiting_count": waiting_count,
-                            "progress_rate": progress_rate,
-                            "process_status":
-                                "COMPLETE" if progress_rate == 100 else "RUNNING",
+                        con=main_engine,
+                        params={
                             "process_name": process_name,
                             "created_at": created_at
                         }
                     )
 
-            else:
+                    if exists.iloc[0]["cnt"] > 0:
 
-                # INSERT
+                        # UPDATE
+                        with main_engine.begin() as conn:
 
-                df = pd.DataFrame([{
-                    "process_name": process_name,
+                            conn.execute(
+                                text("""
+                                    UPDATE inspection_process
+                                    SET
+                                        completed_count = :completed_count,
+                                        waiting_count = :waiting_count,
+                                        progress_rate = :progress_rate,
+                                        process_status = :process_status
+                                    WHERE process_name = :process_name
+                                    AND DATE(created_at) = DATE(:created_at)
+                                """),
+                                {
+                                    "completed_count": completed_count,
+                                    "waiting_count": waiting_count,
+                                    "progress_rate": progress_rate,
+                                    "process_status":
+                                        "COMPLETE"
+                                        if progress_rate == 100
+                                        else "RUNNING",
+                                    "process_name": process_name,
+                                    "created_at": created_at
+                                }
+                            )
 
-                    "total_vehicle_count":
-                        total_vehicle_count,
+                    else:
 
-                    "completed_count":
-                        completed_count,
+                        # INSERT
+                        df = pd.DataFrame([{
+                            "process_name": process_name,
+                            "total_vehicle_count": total_vehicle_count,
+                            "completed_count": completed_count,
+                            "waiting_count": waiting_count,
+                            "progress_rate": progress_rate,
+                            "process_status":
+                                "COMPLETE"
+                                if progress_rate == 100
+                                else "RUNNING",
+                            "created_at": created_at
+                        }])
 
-                    "waiting_count":
-                        waiting_count,
-
-                    "progress_rate":
-                        progress_rate,
-
-                    "process_status":
-                        "COMPLETE"
-                        if progress_rate == 100
-                        else "RUNNING",
-
-                    "created_at":
-                        created_at
-                }])
-
-                df.to_sql(
-                    name="inspection_process",
-                    con=main_engine,
-                    if_exists="append",
-                    index=False
-                )
+                        df.to_sql(
+                            name="inspection_process",
+                            con=main_engine,
+                            if_exists="append",
+                            index=False
+                        )
 
     except Exception as e:
         print(f"오류 발생 : {e}")
 
     finally:
-
         print("process 종료")
         consumer.close()
 
 
 if __name__ == "__main__":
-    run()
+    import threading
+    run(threading.Event())

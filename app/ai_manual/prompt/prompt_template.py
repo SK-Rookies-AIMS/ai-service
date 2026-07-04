@@ -93,7 +93,7 @@ JSON 외의 어떠한 문장도 출력하지 마십시오.
 HUMAN_PROMPT = """
 # 현재 Critical Event
 
-{critical_event}
+{Critical_event}
 
 ------------------------------------------------
 

@@ -5,12 +5,17 @@ import time
 import signal
 import sys
 
+from app.db import (
+    main_dispose_engine,
+    sample_dispose_engine,
+)
+
 from app.scheduler.quality.drive_detail_producer import run as drive_producer
 from app.scheduler.quality.status_detail_producer import run as status_producer
 from app.scheduler.quality.risk_history_producer import run as history_producer
 from app.scheduler.quality.risk_trend_producer import run as trend_producer
 from app.scheduler.quality.process_producer import run as process_producer
-from app.scheduler.quality.stomp_client import run as stomp_client
+#from app.scheduler.quality.stomp_client import run as stomp_client
 
 from app.repository.quality_drive_detail_repository import run as drive_repository
 from app.repository.quality_status_detail_repository import run as status_repository
@@ -18,10 +23,6 @@ from app.repository.quality_risk_history_repository import run as history_reposi
 from app.repository.quality_risk_trend_repository import run as trend_repository
 from app.repository.quality_process_repository import run as process_repository
 from app.repository.quality_summary_repository import run as summary_repository
-
-# DB engine (너 프로젝트에 있는 위치로 수정 필요)
-from app.db import engine
-
 
 # =========================
 # STOP FLAG (핵심)
@@ -36,16 +37,8 @@ threads = []
 def start_thread(name, target):
     print(f"[START] {name}")
 
-    def wrapped():
-        try:
-            # 각 worker가 stop_event를 받도록 확장 가능
-            target(stop_event)
-        except TypeError:
-            # 기존 코드 호환 (stop_event 안 받는 경우)
-            target()
-
     thread = threading.Thread(
-        target=wrapped,
+        target=lambda: target(stop_event),
         daemon=True,
         name=name
     )
@@ -58,25 +51,32 @@ def start_thread(name, target):
 # CLEAN SHUTDOWN
 # =========================
 def cleanup():
+    global cleanup_done
+
+    if cleanup_done:
+        return
+
+    cleanup_done = True
+
     print("\n🧹 Graceful Shutdown 시작...")
 
     # 1. stop signal 전달
     stop_event.set()
 
-    # 2. DB connection pool 종료
-    try:
-        engine.dispose()
-        print("🗄️ DB engine disposed")
-    except Exception as e:
-        print("DB dispose error:", e)
-
-    # 3. thread 종료 대기
+    # 2. thread 종료 대기
     print("⏳ threads join 중...")
     for t in threads:
         try:
             t.join(timeout=5)
         except Exception:
             pass
+
+    # 3. DB connection pool 종료
+    try:
+        main_dispose_engine()
+        sample_dispose_engine()
+    except Exception as e:
+        print("DB dispose error:", e)
 
     print("✅ Shutdown 완료")
 

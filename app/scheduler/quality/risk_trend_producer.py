@@ -1,46 +1,19 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from kafka import KafkaProducer
-from dotenv import load_dotenv
-from urllib.parse import quote_plus
 
 import os
 import json
 import time
 
+from app.db import (
+    main_engine,
+    sample_engine
+)
+
 from app.kafka.iam_provider import MSKTokenProvider
 
 
-def run():
-
-    load_dotenv()
-
-    DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(
-        os.getenv("DB_PASSWORD")
-    )
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-
-    SAMPLE_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/sampledb"
-    )
-
-    MAIN_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/maindb"
-    )
-
-    sample_engine = create_engine(
-        SAMPLE_DATABASE_URL,
-        pool_pre_ping=True
-    )
-
-    main_engine = create_engine(
-        MAIN_DATABASE_URL,
-        pool_pre_ping=True
-    )
-
+def run(stop_event):
     producer = KafkaProducer(
         bootstrap_servers=[
             os.getenv("BROKER_URL_1"),
@@ -131,168 +104,175 @@ def run():
         return "HIGH"
 
     last_id = 0
-
-    while True:
-
-        with main_engine.connect() as conn:
-
-            cars = conn.execute(
-                text("""
-                    SELECT *
-                    FROM inspection_master
-                    WHERE id > :last_id
-                    ORDER BY id
-                """),
-                {"last_id": last_id}
-            ).mappings().all()
-
-        if not cars:
-            time.sleep(1)
-            continue
-
-        for car in cars:
-
-            vehicle_id = car["vehicle_id"]
-
-            created_date = (
-                car["created_at"]
-                .strftime("%Y-%m-%d 00:00:00")
-            )
-
-            low = 0
-            medium = 0
-            high = 0
+    try:
+        while not stop_event.is_set():
 
             with main_engine.connect() as conn:
 
-                today_cars = conn.execute(
+                cars = conn.execute(
                     text("""
-                        SELECT vehicle_id
+                        SELECT *
                         FROM inspection_master
-                        WHERE DATE(created_at)
-                        =
-                        DATE(:created_at)
+                        WHERE id > :last_id
+                        ORDER BY id
                     """),
-                    {
-                        "created_at":
-                            car["created_at"]
-                    }
+                    {"last_id": last_id}
                 ).mappings().all()
 
-            for row in today_cars:
+            if not cars:
+                time.sleep(1)
+                continue
 
-                vid = row["vehicle_id"]
+            for car in cars:
 
-                scores = []
+                vehicle_id = car["vehicle_id"]
 
-                with sample_engine.connect() as conn:
-
-                    status = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_status
-                            WHERE vehicle_id=:vid
-                            LIMIT 1
-                        """),
-                        {"vid": vid}
-                    ).mappings().first()
-
-                    if status:
-                        scores.append(
-                            calculate_status_risk(status)
-                        )
-
-                    control = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_control
-                            WHERE vehicle_id=:vid
-                            LIMIT 1
-                        """),
-                        {"vid": vid}
-                    ).mappings().first()
-
-                    if control:
-                        scores.append(
-                            calculate_control_risk(control)
-                        )
-
-                    drive = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_drive
-                            WHERE vehicle_id=:vid
-                            LIMIT 1
-                        """),
-                        {"vid": vid}
-                    ).mappings().first()
-
-                    if drive:
-                        scores.append(
-                            calculate_drive_risk(drive)
-                        )
-
-                    dynamics = conn.execute(
-                        text("""
-                            SELECT *
-                            FROM car_dynamics
-                            WHERE vehicle_id=:vid
-                            LIMIT 1
-                        """),
-                        {"vid": vid}
-                    ).mappings().first()
-
-                    if dynamics:
-                        scores.append(
-                            calculate_dynamics_risk(dynamics)
-                        )
-
-                if not scores:
-                    continue
-
-                avg_score = (
-                    sum(scores) / len(scores)
+                created_date = (
+                    car["created_at"]
+                    .strftime("%Y-%m-%d 00:00:00")
                 )
 
-                level = get_risk_level(
-                    avg_score
-                )
+                low = 0
+                medium = 0
+                high = 0
 
-                if level == "LOW":
-                    low += 1
+                with main_engine.connect() as conn:
 
-                elif level == "MEDIUM":
-                    medium += 1
+                    today_cars = conn.execute(
+                        text("""
+                            SELECT vehicle_id
+                            FROM inspection_master
+                            WHERE DATE(created_at)
+                            =
+                            DATE(:created_at)
+                        """),
+                        {
+                            "created_at":
+                                car["created_at"]
+                        }
+                    ).mappings().all()
 
-                else:
-                    high += 1
+                for row in today_cars:
 
-            total = low + medium + high
+                    vid = row["vehicle_id"]
 
-            for level, count in [
-                ("LOW", low),
-                ("MEDIUM", medium),
-                ("HIGH", high)
-            ]:
+                    scores = []
 
-                producer.send(
-                    "quality.inspection.risk_trend",
-                    value={
-                        "risk_level": level,
+                    with sample_engine.connect() as conn:
 
-                        "risk_count": count,
+                        status = conn.execute(
+                            text("""
+                                SELECT *
+                                FROM car_status
+                                WHERE vehicle_id=:vid
+                                LIMIT 1
+                            """),
+                            {"vid": vid}
+                        ).mappings().first()
 
-                        "risk_ratio": round(
-                            count / total * 100, 2
-                        ) if total else 0,
+                        if status:
+                            scores.append(
+                                calculate_status_risk(status)
+                            )
 
-                        "created_at":
-                            created_date
-                    }
-                )
+                        control = conn.execute(
+                            text("""
+                                SELECT *
+                                FROM car_control
+                                WHERE vehicle_id=:vid
+                                LIMIT 1
+                            """),
+                            {"vid": vid}
+                        ).mappings().first()
 
-            producer.flush()
+                        if control:
+                            scores.append(
+                                calculate_control_risk(control)
+                            )
 
-            last_id = car["id"]
+                        drive = conn.execute(
+                            text("""
+                                SELECT *
+                                FROM car_drive
+                                WHERE vehicle_id=:vid
+                                LIMIT 1
+                            """),
+                            {"vid": vid}
+                        ).mappings().first()
 
-        time.sleep(1)
+                        if drive:
+                            scores.append(
+                                calculate_drive_risk(drive)
+                            )
+
+                        dynamics = conn.execute(
+                            text("""
+                                SELECT *
+                                FROM car_dynamics
+                                WHERE vehicle_id=:vid
+                                LIMIT 1
+                            """),
+                            {"vid": vid}
+                        ).mappings().first()
+
+                        if dynamics:
+                            scores.append(
+                                calculate_dynamics_risk(dynamics)
+                            )
+
+                    if not scores:
+                        continue
+
+                    avg_score = (
+                        sum(scores) / len(scores)
+                    )
+
+                    level = get_risk_level(
+                        avg_score
+                    )
+
+                    if level == "LOW":
+                        low += 1
+
+                    elif level == "MEDIUM":
+                        medium += 1
+
+                    else:
+                        high += 1
+
+                total = low + medium + high
+
+                for level, count in [
+                    ("LOW", low),
+                    ("MEDIUM", medium),
+                    ("HIGH", high)
+                ]:
+
+                    producer.send(
+                        "quality.inspection.risk_trend",
+                        value={
+                            "risk_level": level,
+
+                            "risk_count": count,
+
+                            "risk_ratio": round(
+                                count / total * 100, 2
+                            ) if total else 0,
+
+                            "created_at":
+                                created_date
+                        }
+                    )
+
+                producer.flush()
+
+                last_id = car["id"]
+
+            time.sleep(1)
+
+    except Exception as e:
+        print(f"오류 발생 : {e}")
+
+    finally:
+        producer.close()
+        print("risk-trend producer 종료")

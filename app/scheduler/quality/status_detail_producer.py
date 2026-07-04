@@ -1,75 +1,42 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from kafka import KafkaProducer
-from dotenv import load_dotenv
-from urllib.parse import quote_plus
 
 import os
 import json
 import time
 
+from app.db import (
+    main_engine,
+    sample_engine,
+)
+
 from app.kafka.iam_provider import MSKTokenProvider
 
 
-def run():
-
-    load_dotenv()
-
-    DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(
-        os.getenv("DB_PASSWORD")
-    )
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-
-    SAMPLE_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/sampledb"
-    )
-
-    MAIN_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/maindb"
-    )
-
-    sample_engine = create_engine(
-        SAMPLE_DATABASE_URL,
-        pool_pre_ping=True
-    )
-
-    main_engine = create_engine(
-        MAIN_DATABASE_URL,
-        pool_pre_ping=True
-    )
+def run(stop_event):
 
     producer = KafkaProducer(
         bootstrap_servers=[
             os.getenv("BROKER_URL_1"),
             os.getenv("BROKER_URL_2")
         ],
-
         security_protocol="SASL_SSL",
-
         sasl_mechanism="OAUTHBEARER",
-
         sasl_oauth_token_provider=MSKTokenProvider(),
-
-        value_serializer=lambda x:
-            json.dumps(x, default=str).encode("utf-8")
+        value_serializer=lambda x: json.dumps(
+            x,
+            default=str
+        ).encode("utf-8")
     )
 
-    def calculate_status_score(
-        status,
-        control
-    ):
+    def calculate_status_score(status, control):
 
         score = 100
         issues = []
 
         speed = float(status["speed"])
         rpm = int(status["att"])
-        battery = float(
-            status["battery_voltage"]
-        )
+        battery = float(status["battery_voltage"])
 
         if speed > 120:
             score -= 20
@@ -87,10 +54,7 @@ def run():
             score -= 40
             issues.append("crash warning")
 
-        if (
-            status["gear"] == "P"
-            and speed > 20
-        ):
+        if status["gear"] == "P" and speed > 20:
             score -= 30
             issues.append("Parking")
 
@@ -108,123 +72,143 @@ def run():
 
     last_id = 0
 
-    while True:
+    try:
 
-        with main_engine.connect() as conn:
+        while not stop_event.is_set():
 
-            new_cars = conn.execute(
-                text("""
-                    SELECT *
-                    FROM inspection_master
-                    WHERE id > :last_id
-                    ORDER BY id
-                """),
-                {"last_id": last_id}
-            ).mappings().all()
+            with main_engine.connect() as conn:
 
-        if not new_cars:
-            time.sleep(1)
-            continue
-
-        with sample_engine.connect() as conn:
-
-            for car in new_cars:
-
-                vehicle_id = car["vehicle_id"]
-
-                status_row = conn.execute(
+                new_cars = conn.execute(
                     text("""
                         SELECT *
-                        FROM car_status
-                        WHERE vehicle_id=:vehicle_id
-                        ORDER BY created_at DESC
-                        LIMIT 1
+                        FROM inspection_master
+                        WHERE id > :last_id
+                        ORDER BY id
                     """),
                     {
-                        "vehicle_id": vehicle_id
+                        "last_id": last_id
                     }
-                ).mappings().first()
+                ).mappings().all()
 
-                control_row = conn.execute(
-                    text("""
-                        SELECT *
-                        FROM car_control
-                        WHERE vehicle_id=:vehicle_id
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """),
-                    {
-                        "vehicle_id": vehicle_id
-                    }
-                ).mappings().first()
+            if not new_cars:
+                time.sleep(1)
+                continue
 
-                if (
-                    not status_row
-                    or not control_row
-                ):
-                    continue
+            with sample_engine.connect() as conn:
 
-                score, issues = (
-                    calculate_status_score(
+                for car in new_cars:
+
+                    if stop_event.is_set():
+                        break
+
+                    vehicle_id = car["vehicle_id"]
+
+                    status_row = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_status
+                            WHERE vehicle_id = :vehicle_id
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        """),
+                        {
+                            "vehicle_id": vehicle_id
+                        }
+                    ).mappings().first()
+
+                    control_row = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_control
+                            WHERE vehicle_id = :vehicle_id
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        """),
+                        {
+                            "vehicle_id": vehicle_id
+                        }
+                    ).mappings().first()
+
+                    if not status_row or not control_row:
+                        continue
+
+                    score, issues = calculate_status_score(
                         status_row,
                         control_row
                     )
-                )
 
-                message = {
+                    message = {
+                        "car_code":
+                            vehicle_id.split("-")[0],
 
-                    "car_code":
-                        vehicle_id.split("-")[0],
+                        "inspection_no":
+                            f"STATUS-{car['id']:05d}",
 
-                    "inspection_no":
-                        f"STATUS-{car['id']:05d}",
+                        "vehicle_id":
+                            vehicle_id,
 
-                    "vehicle_id":
-                        vehicle_id,
+                        "speed":
+                            float(status_row["speed"]),
 
-                    "speed":
-                        float(status_row["speed"]),
+                        "att":
+                            int(status_row["att"]),
 
-                    "att":
-                        int(status_row["att"]),
+                        "gear":
+                            status_row["gear"],
 
-                    "gear":
-                        status_row["gear"],
+                        "battery_voltage":
+                            float(
+                                status_row["battery_voltage"]
+                            ),
 
-                    "battery_voltage":
-                        float(
-                            status_row[
-                                "battery_voltage"
-                            ]
-                        ),
+                        "fuel_rate":
+                            float(
+                                status_row["fuel_rate"]
+                            ),
 
-                    "fuel_rate":
-                        float(
-                            status_row["fuel_rate"]
-                        ),
+                        "status_score":
+                            score,
 
-                    "status_score":
-                        score,
+                        "inspection_result":
+                            get_result(score),
 
-                    "inspection_result":
-                        get_result(score),
+                        "issue_message":
+                            ", ".join(issues)
+                            if issues
+                            else "정상",
 
-                    "issue_message":
-                        ", ".join(issues)
-                        if issues
-                        else "정상",
+                        "created_at":
+                            status_row["created_at"]
+                    }
 
-                    "created_at":
-                        status_row["created_at"]
-                }
+                    producer.send(
+                        "quality.inspection.status_detail",
+                        value=message
+                    )
 
-                producer.send(
-                    "quality.inspection.status_detail",
-                    value=message
-                )
+                    producer.flush()
 
-                producer.flush()
+                    last_id = car["id"]
 
-                last_id = car["id"]
+            time.sleep(1)
 
-        time.sleep(1)
+    except Exception as e:
+
+        print(f"오류 발생 : {e}")
+
+    finally:
+
+        print("status-detail producer 종료")
+
+        try:
+            producer.flush()
+        except Exception:
+            pass
+
+        producer.close()
+
+
+if __name__ == "__main__":
+    from threading import Event
+
+    run(Event())
