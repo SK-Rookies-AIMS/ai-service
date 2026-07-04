@@ -73,11 +73,12 @@ class DefectTransferPredictionRepository:
                 },
             )
 
+        from sqlalchemy import func
         with self.engine.begin() as conn:
             conn.execute(
-                self.table.delete().where(
-                    self.table.c.car_master_id == car_master_id,
-                ),
+                self.table.delete()
+                .where(self.table.c.car_master_id == car_master_id)
+                .where(func.date(self.table.c.predicted_at) == func.current_date())
             )
             if self.engine.dialect.name != "mysql":
                 from sqlalchemy import func, select
@@ -243,9 +244,9 @@ class DefectTransferPredictionRepository:
         *,
         car_master_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        from sqlalchemy import select
+        from sqlalchemy import select, func
 
-        query = select(self.table)
+        query = select(self.table).where(func.date(self.table.c.predicted_at) == func.current_date())
         if car_master_id is not None:
             query = query.where(self.table.c.car_master_id == car_master_id)
         query = query.order_by(

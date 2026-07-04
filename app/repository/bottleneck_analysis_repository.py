@@ -46,8 +46,10 @@ class BottleneckAnalysisRepository:
         from sqlalchemy import func
 
         with self.engine.begin() as conn:
-            delete_query = self.table.delete().where(
-                self.table.c.rank_no.between(start_rank, end_rank),
+            delete_query = (
+                self.table.delete()
+                .where(self.table.c.rank_no.between(start_rank, end_rank))
+                .where(func.date(self.table.c.detected_at) == func.current_date())
             )
             if payload_ranks:
                 delete_query = delete_query.where(
@@ -63,27 +65,31 @@ class BottleneckAnalysisRepository:
                 result = conn.execute(
                     self.table.update()
                     .where(self.table.c.rank_no == row["rank_no"])
+                    .where(func.date(self.table.c.detected_at) == func.current_date())
                     .values(**update_values),
                 )
                 if not result.rowcount:
                     conn.execute(self.table.insert(), row)
 
     def prune_results_after_rank(self, max_rank: int) -> None:
+        from sqlalchemy import func
         with self.engine.begin() as conn:
             conn.execute(
-                self.table.delete().where(self.table.c.rank_no > max_rank),
+                self.table.delete()
+                .where(self.table.c.rank_no > max_rank)
+                .where(func.date(self.table.c.detected_at) == func.current_date())
             )
 
     def list_results(self, *, cursor: int, size: int) -> list[dict[str, Any]]:
-        from sqlalchemy import select
+        from sqlalchemy import select, func
 
-        start_rank = cursor * size + 1
-        end_rank = start_rank + size - 1
+        offset = cursor * size
 
         query = (
             select(self.table)
-            .where(self.table.c.rank_no.between(start_rank, end_rank))
+            .where(func.date(self.table.c.detected_at) == func.current_date())
             .order_by(self.table.c.rank_no.asc(), self.table.c.id.asc())
+            .offset(offset)
             .limit(size)
         )
 
@@ -93,12 +99,16 @@ class BottleneckAnalysisRepository:
     def count_results(self) -> int:
         from sqlalchemy import func, select
 
-        query = select(func.count()).select_from(self.table)
+        query = (
+            select(func.count())
+            .select_from(self.table)
+            .where(func.date(self.table.c.detected_at) == func.current_date())
+        )
         with self.engine.connect() as conn:
             return int(conn.execute(query).scalar_one())
 
     def list_manufacturing_event_histories(self) -> list[dict[str, Any]]:
-        from sqlalchemy import select
+        from sqlalchemy import select, func
 
         query = (
             select(
@@ -110,6 +120,7 @@ class BottleneckAnalysisRepository:
                 manufacturing_event_json.c.event_json,
             )
             .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(func.date(manufacturing_event_json.c.created_at) == func.current_date())
             .order_by(manufacturing_event_json.c.id.asc())
         )
         with self.event_engine.connect() as conn:
