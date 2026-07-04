@@ -9,7 +9,6 @@ from app.api.routers import (
     process_analysis_ws,
     root,
     manual,
-    events,
 )
 
 api_router = APIRouter()
@@ -21,4 +20,3 @@ api_router.include_router(process_analysis_ws.router)
 api_router.include_router(manufacturing_event.router)
 api_router.include_router(ml_dataset.router)
 api_router.include_router(manual.router)
-api_router.include_router(events.router)

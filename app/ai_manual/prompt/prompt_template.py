@@ -74,7 +74,7 @@ Senior 담당자에게는
 
 ## 반드시 반환해야 하는 JSON 형식
 
-{
+{{
     "title": "...",
     "summary": "...",
     "difficulty": "...",
@@ -84,7 +84,7 @@ Senior 담당자에게는
     "completion_check": [],
     "escalation": "...",
     "prevention": []
-}
+}}
 
 JSON 외의 어떠한 문장도 출력하지 마십시오.
 """
@@ -93,7 +93,7 @@ JSON 외의 어떠한 문장도 출력하지 마십시오.
 HUMAN_PROMPT = """
 # 현재 Critical Event
 
-{Critical_event}
+{critical_event}
 
 ------------------------------------------------
 

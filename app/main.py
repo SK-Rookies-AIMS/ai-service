@@ -6,6 +6,7 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
+from fastapi.middleware.cors import CORSMiddleware
 from app.kafka.raw_event_consumer import (
     start_raw_event_consumer,
     stop_raw_event_consumer,
@@ -18,7 +19,6 @@ from app.scheduler.manufacturing import (
 from app.service.manufacturing import (
     resume_incomplete_generation_jobs,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,13 @@ def create_app() -> FastAPI:
 
     app.include_router(api_router)
     register_exception_handlers(app)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173"],  # 프론트 주소
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.on_event("startup")
     def initialize_sampledb_schema() -> None:
