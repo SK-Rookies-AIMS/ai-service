@@ -20,7 +20,7 @@ from app.repository.defect_transfer_prediction_repository import (
 from app.utils.json_utils import from_json, to_json
 from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
 
-DEFECT_TRANSFER_CACHE_VERSION = "v5"
+DEFECT_TRANSFER_CACHE_VERSION = "v7"
 
 
 class DefectTransferAnalysisService:
@@ -187,6 +187,12 @@ class DefectTransferAnalysisService:
                 nextCursor=None,
             )
 
+        display_rows = [
+            row
+            for row in rows
+            if self._is_displayable_cause(row)
+        ]
+
         return DefectTransferCausePage(
             vehicleId=str(selected.get("vehicle_id")),
             carMasterId=int(selected["car_master_id"]),
@@ -203,11 +209,11 @@ class DefectTransferAnalysisService:
                     rank=index,
                     feature="main_cause",
                     label=str(row.get("main_cause") or ""),
-                    value=self._display_value(row.get("influence_score")),
+                    value="",
                     impact=float(row.get("influence_score") or 0.0),
                     message=str(row.get("main_cause") or ""),
                 )
-                for index, row in enumerate(rows, page * safe_size + 1)
+                for index, row in enumerate(display_rows, page * safe_size + 1)
             ],
             hasNext=has_next,
             nextCursor=page + 1 if has_next else None,
@@ -275,6 +281,41 @@ class DefectTransferAnalysisService:
         if isinstance(value, float):
             return f"{value:.2f}"
         return str(value)
+
+    @classmethod
+    def _is_displayable_cause(cls, row: dict[str, Any]) -> bool:
+        message = str(row.get("main_cause") or "").strip()
+        if not message:
+            return False
+
+        value = cls._first_number(message)
+        if value is None:
+            return True
+
+        thresholds = {
+            "도막 두께 편차": 0.0,
+            "도장 온도 편차": 4.0,
+            "공정 지연": 12.0,
+            "Cycle Time 증가": 55.0,
+            "대기열 증가": 8.0,
+            "WIP 증가": 24.0,
+            "전류 RMS 편차": 2.2,
+            "진동 Score 상승": 0.45,
+            "로봇 진동 Score 상승": 0.45,
+            "열화상 Score 상승": 55.0,
+            "최고 온도 상승": 58.0,
+        }
+        for prefix, threshold in thresholds.items():
+            if message.startswith(prefix):
+                return value > threshold
+        return value > 0.0
+
+    @staticmethod
+    def _first_number(text: str) -> float | None:
+        import re
+
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        return float(match.group(0)) if match else None
 
     @staticmethod
     def _db_exception() -> AppException:

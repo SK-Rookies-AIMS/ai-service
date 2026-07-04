@@ -16,7 +16,7 @@ from app.utils.json_utils import from_json, to_json
 
 
 DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
-BOTTLENECK_CACHE_VERSION = "v9"
+BOTTLENECK_CACHE_VERSION = "v10"
 PROCESS_CODE_LABELS = {
     "PRESS": "프레스",
     "BODY": "차체",
@@ -66,16 +66,23 @@ class BottleneckAnalysisService:
         rows = self.repository.list_results(cursor=page, size=size)
         if not rows:
             return BottleneckAnalysisPage(
+                mostBottleneckProcess=None,
+                mostBottleneckRiskLevel=None,
                 content=[],
                 hasNext=False,
                 nextCursor=None,
             )
 
+        top_row = rows[0]
         total_count = self.repository.count_results()
         has_next = total_count > (page + 1) * size
         next_cursor = page + 1 if has_next else None
 
         return BottleneckAnalysisPage(
+            mostBottleneckProcess=self._format_process_label(top_row["process_code"]),
+            mostBottleneckRiskLevel=self._risk_level_label(
+                float(top_row["risk_score"]),
+            ),
             content=[
                 BottleneckAnalysisItem(
                     rankNo=int(row["rank_no"]),
@@ -86,6 +93,7 @@ class BottleneckAnalysisService:
                     delayTime=round(float(row["avg_delay_time"]), 2),
                     affectedVehicleCount=int(row["affected_vehicle_count"]),
                     riskScore=float(row["risk_score"]),
+                    riskLevel=self._risk_level_label(float(row["risk_score"])),
                 )
                 for row in rows
             ],
@@ -303,6 +311,15 @@ class BottleneckAnalysisService:
         if prefix and equipment_no is not None:
             return f"{label} ({prefix}{equipment_no})"
         return label
+
+    @staticmethod
+    def _format_process_label(process_code: Any) -> str:
+        normalized = str(process_code or "").strip().upper()
+        return PROCESS_CODE_LABELS.get(normalized, normalized)
+
+    @staticmethod
+    def _risk_level_label(risk_score: float) -> str:
+        return "위험" if risk_score >= 3.0 else "보통"
 
     @staticmethod
     def _equipment_number(equipment_code: Any | None) -> int | None:

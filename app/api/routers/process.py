@@ -45,6 +45,8 @@ Kafka raw 제조 이벤트를 기반으로 현재 제조 공정의 병목 순위
 BottleneckAnalysisExample = {
     "success": True,
     "data": {
+        "mostBottleneckProcess": "도장",
+        "mostBottleneckRiskLevel": "위험",
         "content": [
             {
                 "rankNo": 1,
@@ -52,6 +54,7 @@ BottleneckAnalysisExample = {
                 "delayTime": 12.4,
                 "affectedVehicleCount": 128,
                 "riskScore": 5.0,
+                "riskLevel": "위험",
             },
             {
                 "rankNo": 2,
@@ -59,6 +62,7 @@ BottleneckAnalysisExample = {
                 "delayTime": 9.8,
                 "affectedVehicleCount": 92,
                 "riskScore": 4.0,
+                "riskLevel": "위험",
             },
         ],
         "hasNext": True,

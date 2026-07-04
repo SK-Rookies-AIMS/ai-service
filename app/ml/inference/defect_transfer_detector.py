@@ -295,31 +295,41 @@ class DefectTransferDetector:
     ) -> list[DefectCause]:
         shap_impacts = self._shap_feature_impacts(features)
         candidates = [
-            ("station_delay_sec", "공정 지연", 12.0, "초"),
-            ("cycle_time_sec", "Cycle Time 증가", 55.0, "초"),
-            ("queue_length", "대기열 증가", 8.0, "대"),
-            ("wip_count", "WIP 증가", 24.0, "대"),
-            ("current_rms_ampere", "전류 RMS 편차", 2.2, "A"),
-            ("vibration_score", "진동 Score 상승", 0.45, ""),
-            ("robot_vibration_score", "로봇 진동 Score 상승", 0.45, ""),
-            ("thermal_score", "열화상 Score 상승", 55.0, ""),
-            ("max_temperature", "최고 온도 상승", 58.0, "°C"),
-            ("paint_thermal_std_temp", "도장 온도 편차", 4.0, "°C"),
-            ("paint_thickness_value", "도막 두께 편차", 130.0, ""),
+            ("station_delay_sec", "공정 지연", 12.0, "초", None),
+            ("cycle_time_sec", "Cycle Time 증가", 55.0, "초", None),
+            ("queue_length", "대기열 증가", 8.0, "대", None),
+            ("wip_count", "WIP 증가", 24.0, "대", None),
+            ("current_rms_ampere", "전류 RMS 편차", 2.2, "A", None),
+            ("vibration_score", "진동 Score 상승", 0.45, "", None),
+            ("robot_vibration_score", "로봇 진동 Score 상승", 0.45, "", None),
+            ("thermal_score", "열화상 Score 상승", 55.0, "", None),
+            ("max_temperature", "최고 온도 상승", 58.0, "°C", None),
+            ("paint_thermal_std_temp", "도장 온도 편차", 4.0, "°C", "PAINT"),
+            ("paint_thickness_value", "도막 두께 편차", 50.0, "", "PAINT"),
         ]
         scored: list[tuple[str, str, Any, float, str]] = []
-        for feature, label, baseline, unit in candidates:
+        for feature, label, baseline, unit, target_process in candidates:
+            if target_process is not None and process_code != target_process:
+                continue
             value = features.get(feature)
             numeric = _safe_float(value, default=0.0)
             if feature == "paint_thickness_value":
-                impact = abs(numeric - 116.0) / 18.0
+                if numeric <= 0:
+                    continue
+                display_value = abs(numeric - baseline)
+                if display_value <= 0:
+                    continue
+                impact = display_value / 20.0
             else:
+                if numeric <= baseline:
+                    continue
+                display_value = numeric
                 impact = max(0.0, numeric - baseline) / max(abs(baseline), 1.0)
             if process_code == "PAINT" and feature.startswith("paint_"):
                 impact *= 1.35
             if shap_impacts:
                 impact = max(impact * 0.35, shap_impacts.get(feature, 0.0))
-            scored.append((feature, label, value, impact, unit))
+            scored.append((feature, label, display_value, impact, unit))
 
         scored.sort(key=lambda item: item[3], reverse=True)
         top = scored[:4]
