@@ -61,7 +61,17 @@ class ManualService:
         # 4. LLM CALL
         response = self.llm.invoke(prompt)
 
-        return response
+        return {
+            "event": {
+                "eventId": event["event_id"],
+                "title": event["title"],
+                "severity": event["severity"],
+                "process": event["process_code"],
+                "equipmentId": event["equipment_id"],
+                "riskScore": event["risk_score"],
+            },
+            "manual": response.model_dump()
+        }
 
     # ======================================================
     # REQUEST BUILDER
