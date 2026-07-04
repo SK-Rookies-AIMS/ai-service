@@ -29,7 +29,9 @@ env:
   NAMESPACE: ai-services
 
   INFRA_REPOSITORY: SK-Rookies-AIMS/infra
-  INFRA_MANIFEST_PATH: k8s/ai-service/ai-service.yaml
+
+  # 기존 ai-service.yaml에서 kustomization.yaml로 변경
+  INFRA_MANIFEST_PATH: k8s/ai-service/kustomization.yaml
 
 jobs:
   deploy:
@@ -66,7 +68,10 @@ jobs:
 
       - name: Build and push Docker image
         id: build-image
+        shell: bash
         run: |
+          set -euo pipefail
+
           IMAGE_TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
           IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
           BRANCH_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_REF_NAME}"
@@ -92,7 +97,10 @@ jobs:
 
       - name: Update kubeconfig and ensure namespace
         if: github.ref_name == 'dev'
+        shell: bash
         run: |
+          set -euo pipefail
+
           aws eks update-kubeconfig \
             --region "$AWS_REGION" \
             --name "$EKS_CLUSTER_NAME"
@@ -101,9 +109,13 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # 변경: DB 이름과 Redis 정보를 추가로 조회
       - name: Load AI service parameters from SSM
         if: github.ref_name == 'dev'
+        shell: bash
         run: |
+          set -euo pipefail
+
           RDS_SECRET_ARN=$(aws ssm get-parameter \
             --name "/aims/dev/rds/secret-arn" \
             --region "$AWS_REGION" \
@@ -122,6 +134,30 @@ jobs:
             --query "Parameter.Value" \
             --output text)
 
+          MAIN_DB_NAME=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/main-db-name" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          SAMPLE_DB_NAME=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/sample-db-name" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          REDIS_HOST=$(aws ssm get-parameter \
+            --name "/aims/dev/redis/host" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          REDIS_PORT=$(aws ssm get-parameter \
+            --name "/aims/dev/redis/port" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
           OPENAI_API_KEY=$(aws ssm get-parameter \
             --name "/aims/dev/ai-service/openai-api-key" \
             --region "$AWS_REGION" \
@@ -133,6 +169,10 @@ jobs:
             "$RDS_SECRET_ARN" \
             "$RDS_HOST" \
             "$RDS_PORT" \
+            "$MAIN_DB_NAME" \
+            "$SAMPLE_DB_NAME" \
+            "$REDIS_HOST" \
+            "$REDIS_PORT" \
             "$OPENAI_API_KEY"
           do
             if [ -z "$VALUE" ] || [ "$VALUE" = "None" ]; then
@@ -144,14 +184,24 @@ jobs:
           echo "::add-mask::$RDS_SECRET_ARN"
           echo "::add-mask::$OPENAI_API_KEY"
 
-          echo "RDS_SECRET_ARN=$RDS_SECRET_ARN" >> "$GITHUB_ENV"
-          echo "RDS_HOST=$RDS_HOST" >> "$GITHUB_ENV"
-          echo "RDS_PORT=$RDS_PORT" >> "$GITHUB_ENV"
-          echo "OPENAI_API_KEY=$OPENAI_API_KEY" >> "$GITHUB_ENV"
+          {
+            echo "RDS_SECRET_ARN=$RDS_SECRET_ARN"
+            echo "RDS_HOST=$RDS_HOST"
+            echo "RDS_PORT=$RDS_PORT"
+            echo "MAIN_DB_NAME=$MAIN_DB_NAME"
+            echo "SAMPLE_DB_NAME=$SAMPLE_DB_NAME"
+            echo "REDIS_HOST=$REDIS_HOST"
+            echo "REDIS_PORT=$REDIS_PORT"
+            echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+          } >> "$GITHUB_ENV"
 
+      # 변경: DB_HOST, DB_PORT, DB 이름, URL, Redis URL 추가
       - name: Create or update AI service Secret
         if: github.ref_name == 'dev'
+        shell: bash
         run: |
+          set -euo pipefail
+
           SECRET_JSON=$(aws secretsmanager get-secret-value \
             --secret-id "$RDS_SECRET_ARN" \
             --region "$AWS_REGION" \
@@ -174,27 +224,50 @@ jobs:
           echo "::add-mask::$DB_USER"
           echo "::add-mask::$DB_PASSWORD"
 
+          DB_USER_ENCODED=$(printf '%s' "$DB_USER" | jq -sRr @uri)
+          DB_PASSWORD_ENCODED=$(printf '%s' "$DB_PASSWORD" | jq -sRr @uri)
+
+          MAIN_DATABASE_URL="mysql+pymysql://${DB_USER_ENCODED}:${DB_PASSWORD_ENCODED}@${RDS_HOST}:${RDS_PORT}/${MAIN_DB_NAME}?charset=utf8mb4"
+          REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}/0"
+
+          echo "::add-mask::$MAIN_DATABASE_URL"
+
           kubectl create secret generic ai-service-secret \
             --namespace "$NAMESPACE" \
             --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
+            --from-literal=MAIN_DATABASE_URL="$MAIN_DATABASE_URL" \
             --from-literal=DB_USER="$DB_USER" \
             --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+            --from-literal=DB_HOST="$RDS_HOST" \
+            --from-literal=DB_PORT="$RDS_PORT" \
+            --from-literal=MAIN_DB_NAME="$MAIN_DB_NAME" \
+            --from-literal=SAMPLE_DB_NAME="$SAMPLE_DB_NAME" \
+            --from-literal=REDIS_URL="$REDIS_URL" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Update AI service image in GitOps repository
+      # 변경: image: 전체 URI가 아니라 newTag:만 변경
+      - name: Update AI service image tag in GitOps repository
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           MANIFEST="infra/${INFRA_MANIFEST_PATH}"
 
-          test -f "$MANIFEST"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Manifest not found: $MANIFEST"
+            exit 1
+          fi
+
+          IMAGE_TAG="${IMAGE_URI##*:}"
 
           sed -i -E \
-            "s|^([[:space:]]*)image:.*aims/ai-service.*$|\1image: ${IMAGE_URI}|g" \
+            "s|^([[:space:]]*)newTag:.*$|\1newTag: ${IMAGE_TAG}|" \
             "$MANIFEST"
 
-          grep -n "image:" "$MANIFEST"
+          grep -n "newTag:" "$MANIFEST"
 
           cd infra
 
