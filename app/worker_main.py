@@ -28,6 +28,7 @@ from app.repository.quality_summary_repository import run as summary_repository
 # STOP FLAG (핵심)
 # =========================
 stop_event = threading.Event()
+cleanup_done = False
 threads = []
 
 
