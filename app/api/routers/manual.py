@@ -14,7 +14,6 @@ service = ManualService()
 
 @router.get("/{user_id}")
 def generate_manual(user_id: int):
-
     result = service.generate_manual(
         user_id=user_id
     )

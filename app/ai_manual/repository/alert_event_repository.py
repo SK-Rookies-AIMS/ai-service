@@ -28,7 +28,7 @@ class AlertEventRepository:
                 resolved_at
             FROM alert_event
             WHERE severity = 'DANGER'
-              AND action_status = 'PENDING'
+              AND action_status = 'INCOMPLETE'
               AND resolved_at IS NULL
             ORDER BY risk_score DESC
             LIMIT 1
