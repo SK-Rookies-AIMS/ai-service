@@ -1,33 +1,13 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 import pandas as pd
-from dotenv import load_dotenv
-import os
-from urllib.parse import quote_plus
 
+from app.db import main_engine
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import QUALITY_INSPECTION_RISK_HISTORY
 from app.kafka.options import RISK_HISTORY_GROUP
 
 
-def run():
-
-    load_dotenv()
-
-    DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD"))
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-    MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
-
-    MAIN_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-    )
-
-    main_engine = create_engine(
-        MAIN_DATABASE_URL,
-        pool_pre_ping=True
-    )
+def run(stop_event):
 
     consumer = create_consumer(
         topic=QUALITY_INSPECTION_RISK_HISTORY,
@@ -36,86 +16,96 @@ def run():
 
     try:
 
-        for msg in consumer:
+        while not stop_event.is_set():
 
-            row = msg.value
+            # 1초마다 종료 여부 확인
+            records = consumer.poll(timeout_ms=1000)
 
-            # Producer에서 전달되는 값
-            inspection_type = row["inspection_type"]
-            inspection_date = row["inspection_date"]
-            risk_score = row["risk_score"]
+            if not records:
+                continue
 
-            # Repository에서 생성
-            start_time = f"{inspection_date} 00:00:00"
-            end_time = f"{inspection_date} 23:59:59"
+            for _, messages in records.items():
 
-            # 같은 날짜 + 같은 검사 타입 존재 여부 확인
-            exists = pd.read_sql(
-                text("""
-                    SELECT COUNT(*) AS cnt
-                    FROM inspection_risk_history
-                    WHERE inspection_type = :inspection_type
-                      AND DATE(start_time) = DATE(:start_time)
-                """),
-                con=main_engine,
-                params={
-                    "inspection_type": inspection_type,
-                    "start_time": start_time
-                }
-            )
+                for msg in messages:
 
-            # 이미 존재하면 UPDATE
-            if exists.iloc[0]["cnt"] > 0:
+                    row = msg.value
 
-                with main_engine.begin() as conn:
+                    # Producer에서 전달되는 값
+                    inspection_type = row["inspection_type"]
+                    inspection_date = row["inspection_date"]
+                    risk_score = row["risk_score"]
 
-                    conn.execute(
+                    # Repository에서 생성
+                    start_time = f"{inspection_date} 00:00:00"
+                    end_time = f"{inspection_date} 23:59:59"
+
+                    # 같은 날짜 + 같은 검사 타입 존재 여부 확인
+                    exists = pd.read_sql(
                         text("""
-                            UPDATE inspection_risk_history
-                            SET
-                                risk_score = :risk_score,
-                                end_time = :end_time
+                            SELECT COUNT(*) AS cnt
+                            FROM inspection_risk_history
                             WHERE inspection_type = :inspection_type
                               AND DATE(start_time) = DATE(:start_time)
                         """),
-                        {
-                            "risk_score": risk_score,
-                            "end_time": end_time,
+                        con=main_engine,
+                        params={
                             "inspection_type": inspection_type,
                             "start_time": start_time
                         }
                     )
 
-            else:
+                    # 이미 존재하면 UPDATE
+                    if exists.iloc[0]["cnt"] > 0:
 
-                # inspection_round 자동 생성
-                with main_engine.begin() as conn:
+                        with main_engine.begin() as conn:
 
-                    inspection_round = conn.execute(
-                        text("""
-                            SELECT COALESCE(MAX(inspection_round), 0) + 1
-                            FROM inspection_risk_history
-                            WHERE inspection_type = :inspection_type
-                        """),
-                        {
-                            "inspection_type": inspection_type
-                        }
-                    ).scalar()
+                            conn.execute(
+                                text("""
+                                    UPDATE inspection_risk_history
+                                    SET
+                                        risk_score = :risk_score,
+                                        end_time = :end_time
+                                    WHERE inspection_type = :inspection_type
+                                      AND DATE(start_time) = DATE(:start_time)
+                                """),
+                                {
+                                    "risk_score": risk_score,
+                                    "end_time": end_time,
+                                    "inspection_type": inspection_type,
+                                    "start_time": start_time
+                                }
+                            )
 
-                df = pd.DataFrame([{
-                    "inspection_type": inspection_type,
-                    "inspection_round": inspection_round,
-                    "risk_score": risk_score,
-                    "start_time": start_time,
-                    "end_time": end_time
-                }])
+                    else:
 
-                df.to_sql(
-                    name="inspection_risk_history",
-                    con=main_engine,
-                    if_exists="append",
-                    index=False
-                )
+                        # inspection_round 자동 생성
+                        with main_engine.begin() as conn:
+
+                            inspection_round = conn.execute(
+                                text("""
+                                    SELECT COALESCE(MAX(inspection_round), 0) + 1
+                                    FROM inspection_risk_history
+                                    WHERE inspection_type = :inspection_type
+                                """),
+                                {
+                                    "inspection_type": inspection_type
+                                }
+                            ).scalar()
+
+                        df = pd.DataFrame([{
+                            "inspection_type": inspection_type,
+                            "inspection_round": inspection_round,
+                            "risk_score": risk_score,
+                            "start_time": start_time,
+                            "end_time": end_time
+                        }])
+
+                        df.to_sql(
+                            name="inspection_risk_history",
+                            con=main_engine,
+                            if_exists="append",
+                            index=False
+                        )
 
     except Exception as e:
 
@@ -128,4 +118,7 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+
+    import threading
+
+    run(threading.Event())

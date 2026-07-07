@@ -1,8 +1,8 @@
 # app/api/routers/manual.py
-
-from fastapi import APIRouter, HTTPException
-
 from app.ai_manual.service.manual_service import ManualService
+from fastapi import APIRouter, HTTPException, Header
+from jose import jwt
+import os
 
 router = APIRouter(
     prefix="/manual",
@@ -11,13 +11,22 @@ router = APIRouter(
 
 service = ManualService()
 
-
 @router.get("")
-def generate_manual():
+def generate_manual(
+    authorization: str = Header(...)
+):
+    token = authorization.replace("Bearer ", "")
 
-    result = service.generate_manual(
-        operator_grade="Junior"
+    payload = jwt.decode(
+        token,
+        os.getenv("JWT_SECRET_KEY"),
+        algorithms=["HS384"]
     )
+
+    user_id = int(payload["sub"])
+    print(payload)
+
+    result = service.generate_manual(user_id)
 
     if result is None:
         raise HTTPException(

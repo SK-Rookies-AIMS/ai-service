@@ -27,7 +27,7 @@ MAIN_DATABASE_URL = (
 
 SAMPLE_DATABASE_URL = (
     f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-    f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
+    f"@{DB_HOST}:{DB_PORT}/{SAMPLE_DB_NAME}"
 )
 
 if not MAIN_DATABASE_URL:

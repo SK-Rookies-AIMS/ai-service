@@ -1,48 +1,10 @@
-# ai_manual/repository/alert_event_repository.py
-
-import os
-from decimal import Decimal
-from urllib.parse import quote_plus
-
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from app.db import main_engine
 
 
 class AlertEventRepository:
 
-    def __init__(self):
-        load_dotenv()
-
-        DB_USER = os.getenv("DB_USER")
-        DB_PASSWORD = quote_plus(
-            os.getenv("DB_PASSWORD")
-        )
-        DB_HOST = os.getenv("DB_HOST")
-        DB_PORT = os.getenv("DB_PORT")
-        MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
-
-        MAIN_DATABASE_URL = (
-            f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-            f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-        )
-
-        self.engine = create_engine(
-            MAIN_DATABASE_URL,
-            pool_pre_ping=True
-        )
-
-    def get_highest_priority_event(self):
-        """
-        현재 처리해야 하는 가장 높은 우선순위의
-        Critical Event를 조회한다.
-
-        조건
-        - action_status = PENDING
-        - resolved_at IS NULL
-        - priority_score DESC
-        - created_at ASC
-        """
-
+    def get_highest_risk_event(self):
         query = text("""
             SELECT
                 log_no,
@@ -65,38 +27,56 @@ class AlertEventRepository:
                 created_at,
                 resolved_at
             FROM alert_event
-            WHERE action_status = 'PENDING'
+            WHERE severity = 'DANGER'
+              AND action_status = 'INCOMPLETE'
               AND resolved_at IS NULL
-            ORDER BY priority_score DESC,
-                     created_at ASC
+            ORDER BY risk_score DESC
             LIMIT 1
         """)
 
-        with self.engine.connect() as conn:
+        with main_engine.connect() as conn:
             row = conn.execute(query).mappings().first()
 
-        if row is None:
+        if not row:
             return None
 
-        return self._convert(row)
+        return dict(row)
+    
+    def get_events(self):
 
-    def _convert(self, row):
+        sql = """
+        SELECT
+            event_id,
+            title,
+            contents,
+            severity,
+            priority_score,
+            risk_score,
+            process_code,
+            equipment_id,
+            created_at
+        FROM alert_event
+        ORDER BY priority_score DESC
         """
-        SQLAlchemy RowMapping -> dict
-        Decimal과 datetime을 JSON 직렬화 가능한 형태로 변환
-        """
 
-        result = {}
+        with main_engine.connect() as conn:
 
-        for key, value in row.items():
+            result = conn.execute(text(sql))
 
-            if isinstance(value, Decimal):
-                result[key] = float(value)
+            return [dict(row._mapping) for row in result]
+        
+    def get_user_role(self, user_id: int):
 
-            elif hasattr(value, "isoformat"):
-                result[key] = value.isoformat()
+        sql = text("""
+            SELECT role
+            FROM users
+            WHERE id = :user_id
+        """)
 
-            else:
-                result[key] = value
+        with main_engine.connect() as conn:
+            role = conn.execute(
+                sql,
+                {"user_id": user_id}
+            ).scalar()
 
-        return result
+        return role or "Junior"

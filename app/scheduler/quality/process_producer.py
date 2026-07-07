@@ -1,37 +1,17 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from kafka import KafkaProducer
-from dotenv import load_dotenv
-from urllib.parse import quote_plus
 
 import os
 import json
-import time
+import threading
 
+from app.db import main_engine
 from app.kafka.iam_provider import MSKTokenProvider
 
 TOTAL_TARGET = 100
 
 
-def run():
-
-    load_dotenv()
-
-    DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(
-        os.getenv("DB_PASSWORD")
-    )
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-
-    MAIN_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/maindb"
-    )
-
-    main_engine = create_engine(
-        MAIN_DATABASE_URL,
-        pool_pre_ping=True
-    )
+def run(stop_event):
 
     producer = KafkaProducer(
         bootstrap_servers=[
@@ -46,134 +26,170 @@ def run():
         sasl_oauth_token_provider=MSKTokenProvider(),
 
         value_serializer=lambda x:
-            json.dumps(x, default=str).encode("utf-8")
+            json.dumps(
+                x,
+                default=str
+            ).encode("utf-8")
     )
 
     last_id = 0
 
-    while True:
+    try:
 
-        with main_engine.connect() as conn:
+        while not stop_event.is_set():
 
-            new_cars = conn.execute(
-                text("""
-                    SELECT
-                        id,
-                        vehicle_id,
-                        created_at
-                    FROM inspection_master
-                    WHERE id > :last_id
-                    ORDER BY id
-                """),
-                {"last_id": last_id}
-            ).mappings().all()
+            with main_engine.connect() as conn:
 
-        if not new_cars:
-            time.sleep(1)
-            continue
+                new_cars = conn.execute(
+                    text("""
+                        SELECT
+                            id,
+                            vehicle_id,
+                            created_at
+                        FROM inspection_master
+                        WHERE id > :last_id
+                        ORDER BY id
+                    """),
+                    {
+                        "last_id": last_id
+                    }
+                ).mappings().all()
 
-        for car in new_cars:
+            if not new_cars:
+                stop_event.wait(1)
+                continue
 
-            current_count = car["id"]
+            for car in new_cars:
 
-            # 생산이 모두 끝난 경우
-            if current_count >= TOTAL_TARGET:
+                if stop_event.is_set():
+                    break
 
-                process_list = [
-                    ("VISUAL", TOTAL_TARGET),
-                    ("FUNCTION", TOTAL_TARGET),
-                    ("DRIVE", TOTAL_TARGET),
-                    ("FINAL", TOTAL_TARGET)
-                ]
+                current_count = car["id"]
 
-            else:
+                # 생산이 모두 끝난 경우
+                if current_count >= TOTAL_TARGET:
 
-                process_list = [
-                    (
-                        "VISUAL",
-                        min(current_count, TOTAL_TARGET)
-                    ),
-
-                    (
-                        "FUNCTION",
-                        min(
-                            max(current_count - 1, 0),
-                            TOTAL_TARGET
-                        )
-                    ),
-
-                    (
-                        "DRIVE",
-                        min(
-                            max(current_count - 2, 0),
-                            TOTAL_TARGET
-                        )
-                    ),
-
-                    (
-                        "FINAL",
-                        min(
-                            max(current_count - 3, 0),
-                            TOTAL_TARGET
-                        )
-                    )
-                ]
-
-            for process_name, completed in process_list:
-
-                waiting = max(
-                    0,
-                    TOTAL_TARGET - completed
-                )
-
-                progress_rate = round(
-                    completed / TOTAL_TARGET * 100,
-                    2
-                )
-
-                if progress_rate >= 100:
-                    process_status = "COMPLETE"
-
-                elif progress_rate == 0:
-                    process_status = "WAIT"
+                    process_list = [
+                        ("VISUAL", TOTAL_TARGET),
+                        ("FUNCTION", TOTAL_TARGET),
+                        ("DRIVE", TOTAL_TARGET),
+                        ("FINAL", TOTAL_TARGET)
+                    ]
 
                 else:
-                    process_status = "RUNNING"
 
-                message = {
-                    "process_name":
-                        process_name,
+                    process_list = [
 
-                    "total_vehicle_count":
-                        TOTAL_TARGET,
+                        (
+                            "VISUAL",
+                            min(
+                                current_count,
+                                TOTAL_TARGET
+                            )
+                        ),
 
-                    "completed_count":
-                        completed,
+                        (
+                            "FUNCTION",
+                            min(
+                                max(
+                                    current_count - 1,
+                                    0
+                                ),
+                                TOTAL_TARGET
+                            )
+                        ),
 
-                    "waiting_count":
-                        waiting,
+                        (
+                            "DRIVE",
+                            min(
+                                max(
+                                    current_count - 2,
+                                    0
+                                ),
+                                TOTAL_TARGET
+                            )
+                        ),
 
-                    "progress_rate":
-                        progress_rate,
+                        (
+                            "FINAL",
+                            min(
+                                max(
+                                    current_count - 3,
+                                    0
+                                ),
+                                TOTAL_TARGET
+                            )
+                        )
+                    ]
 
-                    "process_status":
-                        process_status,
+                for process_name, completed in process_list:
 
-                    "created_at":
-                        car["created_at"]
-                }
+                    waiting = max(
+                        0,
+                        TOTAL_TARGET - completed
+                    )
 
-                producer.send(
-                    "quality.inspection.process",
-                    value=message
-                )
+                    progress_rate = round(
+                        completed / TOTAL_TARGET * 100,
+                        2
+                    )
+
+                    if progress_rate >= 100:
+                        process_status = "COMPLETE"
+
+                    elif progress_rate == 0:
+                        process_status = "WAIT"
+
+                    else:
+                        process_status = "RUNNING"
+
+                    message = {
+
+                        "process_name":
+                            process_name,
+
+                        "total_vehicle_count":
+                            TOTAL_TARGET,
+
+                        "completed_count":
+                            completed,
+
+                        "waiting_count":
+                            waiting,
+
+                        "progress_rate":
+                            progress_rate,
+
+                        "process_status":
+                            process_status,
+
+                        "created_at":
+                            car["created_at"]
+                    }
+
+                    producer.send(
+                        "quality.inspection.process",
+                        value=message
+                    )
+
+                last_id = car["id"]
 
             producer.flush()
 
-            last_id = car["id"]
+            stop_event.wait(1)
 
-        time.sleep(1)
+    except Exception as e:
+
+        print(f"Process Producer 오류 : {e}")
+
+    finally:
+
+        producer.flush()
+        producer.close()
+
+        print("Process Producer 종료")
 
 
 if __name__ == "__main__":
-    run()
+
+    run(threading.Event())

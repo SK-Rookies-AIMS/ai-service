@@ -1,42 +1,19 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from kafka import KafkaProducer
-from dotenv import load_dotenv
-from urllib.parse import quote_plus
+
 import os
 import json
-import time
+import threading
+
+from app.db import (
+    main_engine,
+    sample_engine,
+)
 
 from app.kafka.iam_provider import MSKTokenProvider
 
 
-def run():
-
-    load_dotenv()
-
-    DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD"))
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-
-    SAMPLE_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/sampledb"
-    )
-
-    MAIN_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/maindb"
-    )
-
-    sample_engine = create_engine(
-        SAMPLE_DATABASE_URL,
-        pool_pre_ping=True
-    )
-
-    main_engine = create_engine(
-        MAIN_DATABASE_URL,
-        pool_pre_ping=True
-    )
+def run(stop_event):
 
     producer = KafkaProducer(
         bootstrap_servers=[
@@ -51,96 +28,129 @@ def run():
         sasl_oauth_token_provider=MSKTokenProvider(),
 
         value_serializer=lambda x:
-            json.dumps(x, default=str).encode("utf-8")
+            json.dumps(
+                x,
+                default=str
+            ).encode("utf-8")
     )
 
     last_id = 0
 
-    while True:
+    try:
 
-        # 새로 생산된 차량 조회
-        with main_engine.connect() as conn:
+        while not stop_event.is_set():
 
-            cars = conn.execute(
-                text("""
-                    SELECT id, vehicle_id
-                    FROM inspection_master
-                    WHERE id > :last_id
-                    ORDER BY id
-                """),
-                {"last_id": last_id}
-            ).mappings().all()
+            # 새로 생산된 차량 조회
+            with main_engine.connect() as conn:
 
-        if not cars:
-            time.sleep(1)
-            continue
-
-        for car in cars:
-
-            vehicle_id = car["vehicle_id"]
-
-            # 해당 차량의 주행 데이터 조회
-            with sample_engine.connect() as conn:
-
-                drive_rows = conn.execute(
+                cars = conn.execute(
                     text("""
-                        SELECT *
-                        FROM car_drive
-                        WHERE vehicle_id = :vehicle_id
-                        ORDER BY created_at
+                        SELECT
+                            id,
+                            vehicle_id
+                        FROM inspection_master
+                        WHERE id > :last_id
+                        ORDER BY id
                     """),
-                    {"vehicle_id": vehicle_id}
+                    {
+                        "last_id": last_id
+                    }
                 ).mappings().all()
 
-            if not drive_rows:
-                print(
-                    f"[Drive] {vehicle_id} 데이터 없음"
-                )
-
-                last_id = car["id"]
+            if not cars:
+                stop_event.wait(1)
                 continue
 
-            for row in drive_rows:
+            for car in cars:
 
-                message = {
+                if stop_event.is_set():
+                    break
 
-                    "vehicle_id":
-                        row["vehicle_id"],
+                vehicle_id = car["vehicle_id"]
 
-                    "throttle_position":
-                        round(
-                            float(row["throttle_position"]),
-                            2
-                        ),
+                # 해당 차량의 주행 데이터 조회
+                with sample_engine.connect() as conn:
 
-                    "brake_pressure":
-                        round(
-                            float(row["brake_pressure"]),
-                            2
-                        ),
+                    drive_rows = conn.execute(
+                        text("""
+                            SELECT *
+                            FROM car_drive
+                            WHERE vehicle_id = :vehicle_id
+                            ORDER BY created_at
+                        """),
+                        {
+                            "vehicle_id": vehicle_id
+                        }
+                    ).mappings().all()
 
-                    "steering_angle":
-                        round(
-                            float(row["steering_angle"]),
-                            2
-                        ),
+                if not drive_rows:
 
-                    "created_at":
-                        row["created_at"]
-                }
+                    print(
+                        f"[Drive] {vehicle_id} 데이터 없음"
+                    )
 
-                producer.send(
-                    "quality.inspection.drive_detail",
-                    value=message
-                )
+                    last_id = car["id"]
+                    continue
 
-            producer.flush()
+                for row in drive_rows:
 
-            # 처리 완료 차량 갱신
-            last_id = car["id"]
+                    message = {
 
-        time.sleep(1)
+                        "vehicle_id":
+                            row["vehicle_id"],
+
+                        "throttle_position":
+                            round(
+                                float(
+                                    row["throttle_position"]
+                                ),
+                                2
+                            ),
+
+                        "brake_pressure":
+                            round(
+                                float(
+                                    row["brake_pressure"]
+                                ),
+                                2
+                            ),
+
+                        "steering_angle":
+                            round(
+                                float(
+                                    row["steering_angle"]
+                                ),
+                                2
+                            ),
+
+                        "created_at":
+                            row["created_at"]
+                    }
+
+                    producer.send(
+                        "quality.inspection.drive_detail",
+                        value=message
+                    )
+
+                producer.flush()
+
+                # 처리 완료 차량 갱신
+                last_id = car["id"]
+
+            stop_event.wait(1)
+
+    except Exception as e:
+
+        print(f"Drive Producer 오류 : {e}")
+
+    finally:
+
+        producer.flush()
+        producer.close()
+
+        print("Drive Producer 종료")
 
 
 if __name__ == "__main__":
-    run()
+
+    run(threading.Event())

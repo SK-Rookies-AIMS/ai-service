@@ -1,35 +1,13 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 import pandas as pd
-from dotenv import load_dotenv
-import os
-from urllib.parse import quote_plus
 
+from app.db import main_engine
 from app.kafka.consumer import create_consumer
 from app.kafka.topics import QUALITY_INSPECTION_STATUS_DETAIL
 from app.kafka.options import STATUS_DETAIL_GROUP
 
 
-def run():
-
-    load_dotenv()
-
-    DB_USER = os.getenv("DB_USER")
-    DB_PASSWORD = quote_plus(
-        os.getenv("DB_PASSWORD")
-    )
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-    MAIN_DB_NAME = os.getenv("MAIN_DB_NAME")
-
-    MAIN_DATABASE_URL = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
-        f"@{DB_HOST}:{DB_PORT}/{MAIN_DB_NAME}"
-    )
-
-    main_engine = create_engine(
-        MAIN_DATABASE_URL,
-        pool_pre_ping=True
-    )
+def run(stop_event):
 
     consumer = create_consumer(
         topic=QUALITY_INSPECTION_STATUS_DETAIL,
@@ -38,76 +16,86 @@ def run():
 
     try:
 
-        for msg in consumer:
+        while not stop_event.is_set():
 
-            row = msg.value
+            # 1초마다 종료 여부 확인
+            records = consumer.poll(timeout_ms=1000)
 
-            vehicle_id = row["vehicle_id"]
-
-            # 이미 저장된 차량인지 확인
-            exists = pd.read_sql(
-                text("""
-                    SELECT COUNT(*) AS cnt
-                    FROM inspection_status_detail
-                    WHERE vehicle_id = :vehicle_id
-                """),
-                con=main_engine,
-                params={"vehicle_id": vehicle_id}
-            )
-
-            if exists.iloc[0]["cnt"] > 0:
-
+            if not records:
                 continue
 
-            inspection_status_detail = [{
-                "car_code":
-                    row["car_code"],
+            for _, messages in records.items():
 
-                "inspection_no":
-                    row["inspection_no"],
+                for msg in messages:
 
-                "vehicle_id":
-                    vehicle_id,
+                    row = msg.value
 
-                "speed":
-                    row["speed"],
+                    vehicle_id = row["vehicle_id"]
 
-                "att":
-                    row["att"],
+                    # 이미 저장된 차량인지 확인
+                    exists = pd.read_sql(
+                        text("""
+                            SELECT COUNT(*) AS cnt
+                            FROM inspection_status_detail
+                            WHERE vehicle_id = :vehicle_id
+                        """),
+                        con=main_engine,
+                        params={
+                            "vehicle_id": vehicle_id
+                        }
+                    )
 
-                "gear":
-                    row["gear"],
+                    if exists.iloc[0]["cnt"] > 0:
+                        continue
 
-                "battery_voltage":
-                    row["battery_voltage"],
+                    inspection_status_detail = [{
+                        "car_code":
+                            row["car_code"],
 
-                "fuel_rate":
-                    row["fuel_rate"],
+                        "inspection_no":
+                            row["inspection_no"],
 
-                "status_score":
-                    row["status_score"],
+                        "vehicle_id":
+                            vehicle_id,
 
-                "inspection_result":
-                    row["inspection_result"],
+                        "speed":
+                            row["speed"],
 
-                "issue_message":
-                    row["issue_message"],
+                        "att":
+                            row["att"],
 
-                "created_at":
-                    row["created_at"]
-            }]
+                        "gear":
+                            row["gear"],
 
-            df = pd.DataFrame(
-                inspection_status_detail
-            )
+                        "battery_voltage":
+                            row["battery_voltage"],
 
-            df.to_sql(
-                name="inspection_status_detail",
-                con=main_engine,
-                if_exists="append",
-                index=False
-            )
+                        "fuel_rate":
+                            row["fuel_rate"],
 
+                        "status_score":
+                            row["status_score"],
+
+                        "inspection_result":
+                            row["inspection_result"],
+
+                        "issue_message":
+                            row["issue_message"],
+
+                        "created_at":
+                            row["created_at"]
+                    }]
+
+                    df = pd.DataFrame(
+                        inspection_status_detail
+                    )
+
+                    df.to_sql(
+                        name="inspection_status_detail",
+                        con=main_engine,
+                        if_exists="append",
+                        index=False
+                    )
 
     except Exception as e:
 
@@ -115,12 +103,13 @@ def run():
 
     finally:
 
-        print(
-            "status-detail Consumer 종료"
-        )
+        print("status-detail Consumer 종료")
 
         consumer.close()
 
 
 if __name__ == "__main__":
-    run()
+
+    import threading
+
+    run(threading.Event())
