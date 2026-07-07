@@ -21,11 +21,11 @@ from app.utils.json_utils import from_json, to_json
 DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
 BOTTLENECK_CACHE_VERSION = "v12"
 PROCESS_CODE_LABELS = {
-    "PRESS": "PRESS",
-    "BODY": "BODY",
-    "PAINT": "PAINT",
-    "ASSEMBLY": "ASSEMBLY",
-    "INSPECTION": "INSPECTION",
+    "PRESS": "프레스",
+    "BODY": "차체",
+    "PAINT": "도장",
+    "ASSEMBLY": "의장",
+    "INSPECTION": "검사",
 }
 PROCESS_EQUIPMENT_PREFIXES = {
     "PRESS": "P",

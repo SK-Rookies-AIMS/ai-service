@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 from fastapi import FastAPI
 from app.core.config import settings
+from app.kafka import config as kafka_config
 from app.kafka.iam_provider import MSKTokenProvider
 from app.ml.inference.defect_transfer_detector import (
     DefectTransferDetector,
@@ -26,11 +27,11 @@ from app.websocket.analysis_manager import analysis_websocket_manager
 logger = logging.getLogger(__name__)
 PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
 # assembly-service의 app.kafka.topics.raw.name과 동일한 raw 토픽.
-RAW_TOPIC = "factory.manufacturing.raw"
-ANALYSIS_TOPIC = "factory.manufacturing.analysis"
-RAW_CONSUMER_GROUP_ID = "ai-analysis-consumer-group"
-RAW_AUTO_OFFSET_RESET = "earliest"
-RAW_CONSUMER_CONCURRENCY = 2
+RAW_TOPIC = kafka_config.RAW_TOPIC
+ANALYSIS_TOPIC = kafka_config.ANALYSIS_TOPIC
+RAW_CONSUMER_GROUP_ID = kafka_config.RAW_CONSUMER_GROUP_ID
+RAW_AUTO_OFFSET_RESET = kafka_config.AUTO_OFFSET_RESET
+RAW_CONSUMER_CONCURRENCY = kafka_config.RAW_CONSUMER_CONCURRENCY
 _bottleneck_analysis_lock = Lock()
 
 
@@ -78,6 +79,7 @@ def _run_raw_event_consumer(
 ) -> None:
     try:
         from kafka import KafkaConsumer, KafkaProducer
+        from kafka.errors import CommitFailedError
     except ModuleNotFoundError:
         logger.exception("kafka-python is required to consume manufacturing raw events.")
         return
@@ -89,10 +91,14 @@ def _run_raw_event_consumer(
         group_id=RAW_CONSUMER_GROUP_ID,
         auto_offset_reset=RAW_AUTO_OFFSET_RESET,
         enable_auto_commit=False,
+        max_poll_interval_ms=kafka_config.MAX_POLL_INTERVAL_MS,
+        session_timeout_ms=kafka_config.SESSION_TIMEOUT_MS,
+        heartbeat_interval_ms=kafka_config.HEARTBEAT_INTERVAL_MS,
+        max_poll_records=kafka_config.MAX_POLL_RECORDS,
         security_protocol="SASL_SSL",
         sasl_mechanism="OAUTHBEARER",
         sasl_oauth_token_provider=MSKTokenProvider(),
-        consumer_timeout_ms=1000,
+        consumer_timeout_ms=kafka_config.CONSUMER_TIMEOUT_MS,
     )
     repository = SampleDbRepository(settings.sample_database_connection_url)
     repository.schema.ensure_schema()
@@ -134,7 +140,17 @@ def _run_raw_event_consumer(
                     )
                 finally:
                     # DB 저장/분석 실패 여부와 관계없이 offset을 커밋해 같은 메시지의 무한 재처리를 막는다.
-                    consumer.commit()
+                    try:
+                        consumer.commit()
+                    except CommitFailedError:
+                        logger.warning(
+                            "Offset commit skipped because the consumer group was rebalanced: "
+                            "topic=%s partition=%s offset=%s consumer_index=%s",
+                            record.topic,
+                            record.partition,
+                            record.offset,
+                            consumer_index,
+                        )
     except Exception:
         logger.exception("Raw Kafka consumer failed.")
     finally:
@@ -511,8 +527,8 @@ def _create_analysis_producer(
                 ensure_ascii=False,
                 default=_json_default,
             ).encode("utf-8"),
-            retries=3,
-            linger_ms=10,
+            retries=kafka_config.PRODUCER_RETRIES,
+            linger_ms=kafka_config.PRODUCER_LINGER_MS,
         )
     except Exception:
         logger.exception(
