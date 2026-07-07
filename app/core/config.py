@@ -54,6 +54,54 @@ class Settings(BaseSettings):
 
     broker_url_1: str | None = Field(default=None, alias="BROKER_URL_1")
     broker_url_2: str | None = Field(default=None, alias="BROKER_URL_2")
+    kafka_raw_topic: str = Field(
+        default="factory.manufacturing.raw",
+        alias="KAFKA_RAW_TOPIC",
+    )
+    kafka_analysis_topic: str = Field(
+        default="factory.manufacturing.analysis",
+        alias="KAFKA_ANALYSIS_TOPIC",
+    )
+    kafka_raw_consumer_group_id: str = Field(
+        default="ai-analysis-consumer-group",
+        alias="KAFKA_RAW_CONSUMER_GROUP_ID",
+    )
+    kafka_raw_auto_offset_reset: str = Field(
+        default="earliest",
+        alias="KAFKA_RAW_AUTO_OFFSET_RESET",
+    )
+    kafka_raw_consumer_concurrency: int = Field(
+        default=2,
+        alias="KAFKA_RAW_CONSUMER_CONCURRENCY",
+    )
+    kafka_raw_consumer_max_poll_interval_ms: int = Field(
+        default=900_000,
+        alias="KAFKA_RAW_CONSUMER_MAX_POLL_INTERVAL_MS",
+    )
+    kafka_raw_consumer_session_timeout_ms: int = Field(
+        default=30_000,
+        alias="KAFKA_RAW_CONSUMER_SESSION_TIMEOUT_MS",
+    )
+    kafka_raw_consumer_heartbeat_interval_ms: int = Field(
+        default=10_000,
+        alias="KAFKA_RAW_CONSUMER_HEARTBEAT_INTERVAL_MS",
+    )
+    kafka_raw_consumer_max_poll_records: int = Field(
+        default=1,
+        alias="KAFKA_RAW_CONSUMER_MAX_POLL_RECORDS",
+    )
+    kafka_raw_consumer_timeout_ms: int = Field(
+        default=1_000,
+        alias="KAFKA_RAW_CONSUMER_TIMEOUT_MS",
+    )
+    kafka_analysis_producer_retries: int = Field(
+        default=3,
+        alias="KAFKA_ANALYSIS_PRODUCER_RETRIES",
+    )
+    kafka_analysis_producer_linger_ms: int = Field(
+        default=10,
+        alias="KAFKA_ANALYSIS_PRODUCER_LINGER_MS",
+    )
 
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     redis_key_prefix: str = Field(default="aims:ai-service", alias="REDIS_KEY_PREFIX")
