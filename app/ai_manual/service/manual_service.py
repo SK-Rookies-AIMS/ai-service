@@ -38,7 +38,7 @@ class ManualService:
     # ======================================================
     def generate_manual(
         self,
-        operator_grade: str = "Junior"
+        user_id: int
     ) -> ManualResponse | None:
 
         # 1. EVENT FETCH
@@ -48,6 +48,10 @@ class ManualService:
             return None
 
         # 2. BUILD STRONG REQUEST OBJECT
+        operator_grade = self.repository.get_user_role(user_id)
+
+        if operator_grade is None:
+            operator_grade = "Junior"
         request = self._build_request(event, operator_grade)
 
         # 3. PROMPT BUILD

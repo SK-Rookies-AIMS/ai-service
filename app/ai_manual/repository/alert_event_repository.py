@@ -41,3 +41,42 @@ class AlertEventRepository:
             return None
 
         return dict(row)
+    
+    def get_events(self):
+
+        sql = """
+        SELECT
+            event_id,
+            title,
+            contents,
+            severity,
+            priority_score,
+            risk_score,
+            process_code,
+            equipment_id,
+            created_at
+        FROM alert_event
+        ORDER BY priority_score DESC
+        """
+
+        with main_engine.connect() as conn:
+
+            result = conn.execute(text(sql))
+
+            return [dict(row._mapping) for row in result]
+        
+    def get_user_role(self, user_id: int):
+
+        sql = text("""
+            SELECT role
+            FROM users
+            WHERE id = :user_id
+        """)
+
+        with main_engine.connect() as conn:
+            role = conn.execute(
+                sql,
+                {"user_id": user_id}
+            ).scalar()
+
+        return role or "Junior"

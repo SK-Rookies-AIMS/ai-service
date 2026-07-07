@@ -12,11 +12,11 @@ router = APIRouter(
 service = ManualService()
 
 
-@router.get("")
-def generate_manual():
+@router.get("/{user_id}")
+def generate_manual(user_id: int):
 
     result = service.generate_manual(
-        operator_grade="Junior"
+        user_id=user_id
     )
 
     if result is None:
@@ -26,3 +26,4 @@ def generate_manual():
         )
 
     return result
+
