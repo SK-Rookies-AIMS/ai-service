@@ -26,11 +26,10 @@ env:
   AWS_REGION: ap-northeast-2
   EKS_CLUSTER_NAME: aims-dev-eks
   ECR_REPOSITORY: aims/ai-service
-  NAMESPACE: ai-services
+  NAMESPACE: aims-project
 
   INFRA_REPOSITORY: SK-Rookies-AIMS/infra
-
-  # 기존 ai-service.yaml에서 kustomization.yaml로 변경
+  INFRA_BRANCH: dev
   INFRA_MANIFEST_PATH: k8s/ai-service/kustomization.yaml
 
 jobs:
