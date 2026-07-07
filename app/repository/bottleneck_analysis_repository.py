@@ -46,8 +46,10 @@ class BottleneckAnalysisRepository:
         from sqlalchemy import func
 
         with self.engine.begin() as conn:
-            delete_query = self.table.delete().where(
-                self.table.c.rank_no.between(start_rank, end_rank),
+            delete_query = (
+                self.table.delete()
+                .where(self.table.c.rank_no.between(start_rank, end_rank))
+                .where(func.date(self.table.c.detected_at) == func.current_date())
             )
             if payload_ranks:
                 delete_query = delete_query.where(
@@ -63,42 +65,66 @@ class BottleneckAnalysisRepository:
                 result = conn.execute(
                     self.table.update()
                     .where(self.table.c.rank_no == row["rank_no"])
+                    .where(func.date(self.table.c.detected_at) == func.current_date())
                     .values(**update_values),
                 )
                 if not result.rowcount:
                     conn.execute(self.table.insert(), row)
 
     def prune_results_after_rank(self, max_rank: int) -> None:
+        from sqlalchemy import func
         with self.engine.begin() as conn:
             conn.execute(
-                self.table.delete().where(self.table.c.rank_no > max_rank),
+                self.table.delete()
+                .where(self.table.c.rank_no > max_rank)
+                .where(func.date(self.table.c.detected_at) == func.current_date())
             )
 
-    def list_results(self, *, cursor: int, size: int) -> list[dict[str, Any]]:
-        from sqlalchemy import select
+    def list_results(
+        self,
+        *,
+        cursor: int,
+        size: int,
+    ) -> list[dict[str, Any]]:
+        event_ids = self._event_ids_for_today()
+        if not event_ids:
+            return []
 
-        start_rank = cursor * size + 1
-        end_rank = start_rank + size - 1
+        from sqlalchemy import select
 
         query = (
             select(self.table)
-            .where(self.table.c.rank_no.between(start_rank, end_rank))
-            .order_by(self.table.c.rank_no.asc(), self.table.c.id.asc())
+            .where(self.table.c.manufacturing_event_id.in_(event_ids))
+            .order_by(
+                self.table.c.rank_no.asc(),
+                self.table.c.id.asc(),
+            )
+            .offset(cursor * size)
             .limit(size)
         )
 
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(query).mappings()]
 
-    def count_results(self) -> int:
+    def count_results(
+        self,
+    ) -> int:
+        event_ids = self._event_ids_for_today()
+        if not event_ids:
+            return 0
+
         from sqlalchemy import func, select
 
-        query = select(func.count()).select_from(self.table)
+        query = (
+            select(func.count())
+            .select_from(self.table)
+            .where(self.table.c.manufacturing_event_id.in_(event_ids))
+        )
         with self.engine.connect() as conn:
             return int(conn.execute(query).scalar_one())
 
     def list_manufacturing_event_histories(self) -> list[dict[str, Any]]:
-        from sqlalchemy import select
+        from sqlalchemy import select, func
 
         query = (
             select(
@@ -109,7 +135,9 @@ class BottleneckAnalysisRepository:
                 manufacturing_event_json.c.event_time,
                 manufacturing_event_json.c.event_json,
             )
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
             .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
             .order_by(manufacturing_event_json.c.id.asc())
         )
         with self.event_engine.connect() as conn:
@@ -118,6 +146,61 @@ class BottleneckAnalysisRepository:
                 self._to_bottleneck_history(row)
                 for row in rows
             ]
+
+    def list_pending_manufacturing_event_histories(self) -> list[dict[str, Any]]:
+        from sqlalchemy import select, func
+
+        query = (
+            select(
+                manufacturing_event_json.c.id,
+                manufacturing_event_json.c.car_master_id,
+                manufacturing_event_json.c.process_code,
+                manufacturing_event_json.c.equipment_id,
+                manufacturing_event_json.c.event_time,
+                manufacturing_event_json.c.event_json,
+            )
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
+            .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(manufacturing_event_json.c.bottleneck_analysis_done.is_(False))
+            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+            .order_by(manufacturing_event_json.c.id.asc())
+        )
+        with self.event_engine.connect() as conn:
+            rows = conn.execute(query).mappings()
+            return [
+                self._to_bottleneck_history(row)
+                for row in rows
+            ]
+
+    def _event_ids_for_today(self) -> list[int]:
+        from sqlalchemy import func, select
+
+        query = (
+            select(manufacturing_event_json.c.id)
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
+            .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+        )
+        with self.event_engine.connect() as conn:
+            return [int(row[0]) for row in conn.execute(query).all()]
+
+    def mark_bottleneck_analysis_done(self, event_ids: Iterable[int]) -> int:
+        event_ids = [int(event_id) for event_id in event_ids]
+        if not event_ids:
+            return 0
+
+        from sqlalchemy import func
+
+        with self.event_engine.begin() as conn:
+            result = conn.execute(
+                manufacturing_event_json.update()
+                .where(manufacturing_event_json.c.id.in_(event_ids))
+                .values(
+                    bottleneck_analysis_done=True,
+                    updated_at=func.current_timestamp(),
+                ),
+            )
+        return int(result.rowcount or 0)
 
     def _to_bottleneck_history(self, row: dict[str, Any]) -> dict[str, Any]:
         event_json = self._event_json_dict(row["event_json"])

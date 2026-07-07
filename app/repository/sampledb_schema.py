@@ -96,6 +96,18 @@ manufacturing_event_json = Table(
         nullable=False,
         server_default="NOT_ANALYZED",
     ),
+    Column(
+        "bottleneck_analysis_done",
+        Boolean,
+        nullable=False,
+        server_default="0",
+    ),
+    Column(
+        "defect_transfer_analysis_done",
+        Boolean,
+        nullable=False,
+        server_default="0",
+    ),
     Column("is_sent", Boolean, nullable=False, server_default="0"),
     Column("retry_count", Integer, nullable=False, server_default="0"),
     Column("error_message", Text),
@@ -109,6 +121,18 @@ manufacturing_event_json = Table(
     ),
     # Scheduler의 READY/미전송 조회와 차량별 공정 진행 갱신을 위한 핵심 인덱스.
     Index("idx_dispatch", "dispatch_status", "is_sent", "id"),
+    Index(
+        "idx_bottleneck_analysis_pending",
+        "is_sent",
+        "bottleneck_analysis_done",
+        "id",
+    ),
+    Index(
+        "idx_defect_transfer_analysis_pending",
+        "is_sent",
+        "defect_transfer_analysis_done",
+        "id",
+    ),
     Index("idx_car_process", "car_master_id", "process_code"),
     Index("idx_process_status", "process_code", "dispatch_status"),
     Index("idx_equipment_status", "equipment_id", "dispatch_status"),

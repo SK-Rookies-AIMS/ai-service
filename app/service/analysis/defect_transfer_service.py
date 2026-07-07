@@ -20,7 +20,8 @@ from app.repository.defect_transfer_prediction_repository import (
 from app.utils.json_utils import from_json, to_json
 from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
 
-DEFECT_TRANSFER_CACHE_VERSION = "v7"
+
+DEFECT_TRANSFER_CACHE_VERSION = "v8"
 
 
 class DefectTransferAnalysisService:
@@ -50,16 +51,20 @@ class DefectTransferAnalysisService:
         cursor: int | None,
         size: int,
     ) -> DefectTransferPredictionPage:
-        cache_key = self._prediction_cache_key(cursor=cursor, size=size)
+        cache_key = self._prediction_cache_key(
+            cursor=cursor,
+            size=size,
+        )
         cached_value = self._cache_get(cache_key)
         if cached_value:
-            cached_page = DefectTransferPredictionPage.model_validate(
-                from_json(cached_value),
-            )
+            cached_page = DefectTransferPredictionPage.model_validate(from_json(cached_value))
             if cached_page.content:
                 return cached_page
 
-        page = self.get_predictions(cursor=cursor, size=size)
+        page = self.get_predictions(
+            cursor=cursor,
+            size=size,
+        )
         self._cache_set(cache_key, page.model_dump(by_alias=False))
         return page
 
@@ -101,7 +106,7 @@ class DefectTransferAnalysisService:
         except Exception as exc:
             self._redis_client = None
             raise AppException(
-                "불량 전이 예측 Redis 캐시 삭제에 실패했습니다.",
+                "Defect transfer Redis cache clear failed.",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             ) from exc
 
@@ -135,19 +140,19 @@ class DefectTransferAnalysisService:
 
         if diagnostics["sourceEventCount"] == 0:
             status_text = "NO_SOURCE_EVENTS"
-            message = "sampledb.manufacturing_event_json에 원천 이벤트가 없습니다."
+            message = "sampledb.manufacturing_event_json source events not found."
         elif diagnostics["sentSourceEventCount"] == 0:
             status_text = "NO_SENT_SOURCE_EVENTS"
-            message = "원천 이벤트는 있지만 is_sent=true 이벤트가 없습니다."
+            message = "No sent source events were found."
         elif diagnostics["predictionResultRowCount"] == 0:
             status_text = "NO_PREDICTION_RESULTS"
-            message = "원천 이벤트는 있지만 예측 결과 테이블에 저장된 행이 없습니다."
+            message = "No defect transfer prediction results were found."
         elif diagnostics["visiblePredictionCarCount"] == 0:
             status_text = "NO_VISIBLE_PREDICTIONS"
-            message = "예측 결과는 저장됐지만 화면 목록 필터를 통과하는 차량이 없습니다."
+            message = "Prediction rows exist, but none are visible in the list."
         else:
             status_text = "OK"
-            message = "화면에 표시 가능한 불량 전이 예측 데이터가 있습니다."
+            message = "Defect transfer analysis data is available."
 
         return {
             **diagnostics,
@@ -187,11 +192,7 @@ class DefectTransferAnalysisService:
                 nextCursor=None,
             )
 
-        display_rows = [
-            row
-            for row in rows
-            if self._is_displayable_cause(row)
-        ]
+        display_rows = [row for row in rows if self._is_displayable_cause(row)]
 
         return DefectTransferCausePage(
             vehicleId=str(selected.get("vehicle_id")),
@@ -205,13 +206,9 @@ class DefectTransferAnalysisService:
             predictedDefectProcess=self._resolve_predicted_defect_process(selected),
             transferProbability=self._percent(selected.get("target_defect_probability")),
             content=[
-                DefectTransferCauseItem(
+                self._to_cause_item(
+                    row,
                     rank=index,
-                    feature="main_cause",
-                    label=str(row.get("main_cause") or ""),
-                    value="",
-                    impact=float(row.get("influence_score") or 0.0),
-                    message=str(row.get("main_cause") or ""),
                 )
                 for index, row in enumerate(display_rows, page * safe_size + 1)
             ],
@@ -223,9 +220,8 @@ class DefectTransferAnalysisService:
         self,
         row: dict[str, Any],
     ) -> DefectTransferPredictionItem:
-        vehicle_id = str(row.get("vehicle_id"))
         return DefectTransferPredictionItem(
-            vehicleId=vehicle_id,
+            vehicleId=str(row.get("vehicle_id")),
             carMasterId=int(row["car_master_id"]),
             currentProcess=format_process_with_line(
                 row.get("source_process_code"),
@@ -259,7 +255,6 @@ class DefectTransferAnalysisService:
         if cls._result_probability(row) <= 0:
             return None
 
-        # Return the database column value if available
         db_val = row.get("predicted_defect_process")
         if db_val:
             return db_val
@@ -284,7 +279,7 @@ class DefectTransferAnalysisService:
 
     @classmethod
     def _is_displayable_cause(cls, row: dict[str, Any]) -> bool:
-        message = str(row.get("main_cause") or "").strip()
+        message = cls._primary_cause_message(row).strip()
         if not message:
             return False
 
@@ -293,22 +288,66 @@ class DefectTransferAnalysisService:
             return True
 
         thresholds = {
-            "도막 두께 편차": 0.0,
-            "도장 온도 편차": 4.0,
-            "공정 지연": 12.0,
-            "Cycle Time 증가": 55.0,
-            "대기열 증가": 8.0,
-            "WIP 증가": 24.0,
-            "전류 RMS 편차": 2.2,
-            "진동 Score 상승": 0.45,
-            "로봇 진동 Score 상승": 0.45,
-            "열화상 Score 상승": 55.0,
-            "최고 온도 상승": 58.0,
+            "pressure": 0.0,
+            "temperature": 4.0,
+            "vibration": 0.45,
+            "cycle time": 55.0,
+            "wip": 24.0,
+            "rms": 2.2,
         }
+        lower_message = message.lower()
         for prefix, threshold in thresholds.items():
-            if message.startswith(prefix):
+            if prefix in lower_message:
                 return value > threshold
         return value > 0.0
+
+    @staticmethod
+    def _primary_cause_message(row: dict[str, Any]) -> str:
+        main_causes = row.get("main_causes")
+        if isinstance(main_causes, list) and main_causes:
+            first = main_causes[0]
+            if isinstance(first, dict):
+                message = first.get("message") or first.get("label") or ""
+                return str(message).strip()
+
+        return ""
+
+    @classmethod
+    def _to_cause_item(
+        cls,
+        row: dict[str, Any],
+        *,
+        rank: int,
+    ) -> DefectTransferCauseItem:
+        main_causes = row.get("main_causes")
+        normalized_main_causes: list[dict[str, Any]] = []
+        if isinstance(main_causes, list):
+            for cause in main_causes:
+                if not isinstance(cause, dict):
+                    continue
+                message = str(cause.get("message") or cause.get("label") or "").strip()
+                if not message:
+                    continue
+                try:
+                    impact = float(cause.get("impact") or 0.0)
+                except (TypeError, ValueError):
+                    impact = 0.0
+                normalized_main_causes.append(
+                    {
+                        "message": message,
+                        "impact": impact,
+                    },
+                )
+
+        return DefectTransferCauseItem(
+            rank=rank,
+            feature="main_causes",
+            label=cls._primary_cause_message(row),
+            value="",
+            impact=float(row.get("influence_score") or 0.0),
+            message=cls._primary_cause_message(row),
+            main_causes=normalized_main_causes,
+        )
 
     @staticmethod
     def _first_number(text: str) -> float | None:
@@ -320,8 +359,7 @@ class DefectTransferAnalysisService:
     @staticmethod
     def _db_exception() -> AppException:
         return AppException(
-            "불량 전이 예측 결과 데이터베이스 조회에 실패했습니다. "
-            "MAIN_DB_NAME/SAMPLE_DB_NAME/DB 계정 권한을 확인해주세요.",
+            "Defect transfer analysis query failed. Please check DB settings and permissions.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -333,7 +371,7 @@ class DefectTransferAnalysisService:
         except Exception as exc:
             self._redis_client = None
             raise AppException(
-                "불량 전이 예측 Redis 캐시 조회에 실패했습니다.",
+                "Defect transfer Redis cache lookup failed.",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             ) from exc
 
@@ -349,7 +387,7 @@ class DefectTransferAnalysisService:
         except Exception as exc:
             self._redis_client = None
             raise AppException(
-                "불량 전이 예측 Redis 캐시 저장에 실패했습니다.",
+                "Defect transfer Redis cache write failed.",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             ) from exc
 
@@ -371,7 +409,12 @@ class DefectTransferAnalysisService:
         text = str(value or "__default__").strip()
         return text.replace(":", "_").replace("/", "_").replace("\\", "_")
 
-    def _prediction_cache_key(self, *, cursor: int | None, size: int) -> str:
+    def _prediction_cache_key(
+        self,
+        *,
+        cursor: int | None,
+        size: int,
+    ) -> str:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
         return (
@@ -388,10 +431,9 @@ class DefectTransferAnalysisService:
     ) -> str:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
-        safe_vehicle_id = self._safe_cache_part(vehicle_id)
         return (
             f"{settings.redis_key_prefix}:process:defect-transfer:"
-            f"causes:{DEFECT_TRANSFER_CACHE_VERSION}:{safe_vehicle_id}:{page}:{safe_size}"
+            f"causes:{DEFECT_TRANSFER_CACHE_VERSION}:{self._safe_cache_part(vehicle_id)}:{page}:{safe_size}"
         )
 
 

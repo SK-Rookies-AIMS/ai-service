@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from app.repository.sampledb_schema import car_master, equipment, manufacturing_event_json
@@ -48,53 +48,65 @@ class DefectTransferPredictionRepository:
         predicted_at: datetime,
     ) -> int:
         manufacturing_event_id = self._manufacturing_event_id(event_id)
-        rows = []
+        main_causes = self._normalize_main_causes(causes)
         cause_rows = causes or [
             {
-                "message": "모델 기반 주요 원인이 산출되지 않았습니다.",
+                "message": "no main cause available",
                 "impact": 0.0,
             },
         ]
-        for cause in cause_rows[:5]:
-            rows.append(
-                {
-                    "manufacturing_event_id": manufacturing_event_id,
-                    "car_master_id": car_master_id,
-                    "source_process_code": source_process_code,
-                    "target_process_code": target_process_code,
-                    "current_defect_probability": current_defect_probability,
-                    "target_defect_probability": target_defect_probability,
-                    "predicted_defect_process": predicted_defect_process,
-                    "expected_occurrence_step": expected_occurrence_step,
-                    "risk_grade": risk_grade,
-                    "main_cause": str(cause.get("message") or cause.get("label") or "")[:200],
-                    "influence_score": float(cause.get("impact") or 0.0),
-                    "predicted_at": predicted_at,
-                },
-            )
+        top_cause = cause_rows[0] if cause_rows else {}
+        row = {
+            "manufacturing_event_id": manufacturing_event_id,
+            "car_master_id": car_master_id,
+            "source_process_code": source_process_code,
+            "target_process_code": target_process_code,
+            "current_defect_probability": current_defect_probability,
+            "target_defect_probability": target_defect_probability,
+            "predicted_defect_process": predicted_defect_process,
+            "expected_occurrence_step": expected_occurrence_step,
+            "risk_grade": risk_grade,
+            "main_causes": main_causes,
+            "influence_score": float(top_cause.get("impact") or 0.0),
+            "predicted_at": predicted_at,
+        }
 
         with self.engine.begin() as conn:
             conn.execute(
                 self.table.delete().where(
-                    self.table.c.car_master_id == car_master_id,
+                    self.table.c.manufacturing_event_id == manufacturing_event_id,
                 ),
             )
             if self.engine.dialect.name != "mysql":
                 from sqlalchemy import func, select
 
-                next_id = int(
-                    conn.execute(select(func.max(self.table.c.id))).scalar() or 0,
-                )
-                rows = [
-                    {**row, "id": next_id + index}
-                    for index, row in enumerate(rows, 1)
-                ]
-            conn.execute(self.table.insert(), rows)
-        return len(rows)
+                next_id = int(conn.execute(select(func.max(self.table.c.id))).scalar() or 0)
+                row = {**row, "id": next_id + 1}
+            conn.execute(self.table.insert(), [row])
+        return 1
 
-    def list_prediction_page(self, *, cursor: int, size: int) -> tuple[list[dict[str, Any]], bool]:
-        from sqlalchemy import select
+    def has_prediction_for_event(self, event_id: str) -> bool:
+        manufacturing_event_id = self._manufacturing_event_id(event_id)
+        if manufacturing_event_id is None:
+            return False
 
+        from sqlalchemy import func, select
+
+        query = (
+            select(func.count())
+            .select_from(self.table)
+            .where(self.table.c.manufacturing_event_id == manufacturing_event_id)
+            .where(func.date(self.table.c.predicted_at) == func.current_date())
+        )
+        with self.engine.connect() as conn:
+            return int(conn.execute(query).scalar_one()) > 0
+
+    def list_prediction_page(
+        self,
+        *,
+        cursor: int,
+        size: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
         rows = self._all_prediction_rows()
         latest_by_car: dict[int, dict[str, Any]] = {}
         for row in rows:
@@ -131,7 +143,9 @@ class DefectTransferPredictionRepository:
         size: int,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool]:
         car_master_id = self._car_master_id(vehicle_id) if vehicle_id else None
-        rows = self._all_prediction_rows(car_master_id=car_master_id)
+        rows = self._all_prediction_rows(
+            car_master_id=car_master_id,
+        )
         if not rows:
             return None, [], False
 
@@ -155,6 +169,27 @@ class DefectTransferPredictionRepository:
         page = latest_rows[offset : offset + size]
         return latest_rows[0], page, len(latest_rows) > offset + size
 
+    def list_date_options(self, *, vehicle_id: str | None = None) -> list[dict[str, Any]]:
+        from sqlalchemy import func, select
+
+        car_master_id = self._car_master_id(vehicle_id) if vehicle_id else None
+        event_ids = self._prediction_event_ids(car_master_id=car_master_id)
+        if not event_ids:
+            return []
+
+        query = (
+            select(
+                func.date(manufacturing_event_json.c.event_time).label("date"),
+                func.min(manufacturing_event_json.c.event_id).label("sample_event_id"),
+            )
+            .where(manufacturing_event_json.c.id.in_(event_ids))
+            .where(manufacturing_event_json.c.event_time.is_not(None))
+            .group_by(func.date(manufacturing_event_json.c.event_time))
+            .order_by(func.date(manufacturing_event_json.c.event_time).desc())
+        )
+        with self.event_engine.connect() as conn:
+            return [dict(row) for row in conn.execute(query).mappings()]
+
     def diagnostics(self) -> dict[str, Any]:
         from sqlalchemy import distinct, func, select
 
@@ -167,6 +202,7 @@ class DefectTransferPredictionRepository:
                 conn.execute(
                     select(func.count())
                     .select_from(manufacturing_event_json)
+                    .where(manufacturing_event_json.c.dispatch_status == "SENT")
                     .where(manufacturing_event_json.c.is_sent.is_(True)),
                 ).scalar()
                 or 0,
@@ -245,7 +281,13 @@ class DefectTransferPredictionRepository:
     ) -> list[dict[str, Any]]:
         from sqlalchemy import select
 
-        query = select(self.table)
+        event_ids = self._prediction_event_ids(car_master_id=car_master_id)
+        if not event_ids:
+            return []
+
+        query = select(self.table).where(
+            self.table.c.manufacturing_event_id.in_(event_ids),
+        )
         if car_master_id is not None:
             query = query.where(self.table.c.car_master_id == car_master_id)
         query = query.order_by(
@@ -283,6 +325,20 @@ class DefectTransferPredictionRepository:
         with self.event_engine.connect() as conn:
             value = conn.execute(query).scalar()
         return int(value) if value is not None else None
+
+    def _prediction_event_ids(self, *, car_master_id: int | None = None) -> list[int]:
+        from sqlalchemy import func, select
+
+        query = (
+            select(manufacturing_event_json.c.id)
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
+            .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+        )
+        if car_master_id is not None:
+            query = query.where(manufacturing_event_json.c.car_master_id == car_master_id)
+        with self.event_engine.connect() as conn:
+            return [int(row[0]) for row in conn.execute(query).all()]
 
     @staticmethod
     def _result_probability_percent(row: dict[str, Any]) -> int:
@@ -420,7 +476,7 @@ class DefectTransferPredictionRepository:
 
     def _init_sqlalchemy(self) -> None:
         try:
-            from sqlalchemy import BigInteger, Column, DateTime, Double, Enum
+            from sqlalchemy import BigInteger, Column, DateTime, Double, Enum, JSON
             from sqlalchemy import Index, Integer, MetaData, String, Table, func
             from sqlalchemy import create_engine
         except ModuleNotFoundError as exc:
@@ -443,7 +499,7 @@ class DefectTransferPredictionRepository:
             Column("predicted_defect_process", String(50)),
             Column("expected_occurrence_step", Integer),
             Column("risk_grade", String(20)),
-            Column("main_cause", String(200)),
+            Column("main_causes", JSON),
             Column("influence_score", Double),
             Column("predicted_at", DateTime, nullable=False),
             Column("created_at", DateTime, nullable=False, server_default=func.current_timestamp()),
@@ -492,7 +548,7 @@ class DefectTransferPredictionRepository:
             "predicted_defect_process": "VARCHAR(50) NULL",
             "expected_occurrence_step": "INT NULL",
             "risk_grade": "VARCHAR(20) NULL",
-            "main_cause": "VARCHAR(200) NULL",
+            "main_causes": "JSON NULL",
             "influence_score": "DOUBLE NULL",
             "predicted_at": "DATETIME NOT NULL",
             "created_at": "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
@@ -501,7 +557,19 @@ class DefectTransferPredictionRepository:
                 "ON UPDATE CURRENT_TIMESTAMP"
             ),
         }
+        removed_columns = ("main_cause",)
         with self.engine.begin() as conn:
+            for column_name in removed_columns:
+                if column_name not in columns:
+                    continue
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"DROP COLUMN {column_name}",
+                    ),
+                )
+                columns.remove(column_name)
+
             for column_name, definition in expected_columns.items():
                 if column_name not in columns:
                     conn.execute(
@@ -525,3 +593,31 @@ class DefectTransferPredictionRepository:
                         f"MODIFY COLUMN {column_name} {definition}",
                     ),
                 )
+
+    @staticmethod
+    def _normalize_main_causes(causes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for cause in causes[:5]:
+            message = str(cause.get("message") or cause.get("label") or "").strip()
+            if not message:
+                continue
+            try:
+                impact = float(cause.get("impact") or 0.0)
+            except (TypeError, ValueError):
+                impact = 0.0
+            normalized.append(
+                {
+                    "message": message,
+                    "impact": impact,
+                },
+            )
+
+        if normalized:
+            return normalized
+
+        return [
+            {
+                "message": "no main cause available",
+                "impact": 0.0,
+            },
+        ]
