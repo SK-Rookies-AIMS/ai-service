@@ -75,7 +75,23 @@ class SampleDbSchemaManager:
     def _align_manufacturing_event_json_mysql(self) -> None:
         if self.engine.dialect.name != "mysql":
             return
+        existing_columns = {
+            column["name"]
+            for column in inspect(self.engine).get_columns("manufacturing_event_json")
+        }
         with self.engine.begin() as conn:
+            for column_name, definition in {
+                "bottleneck_analysis_done": "TINYINT(1) NOT NULL DEFAULT 0",
+                "defect_transfer_analysis_done": "TINYINT(1) NOT NULL DEFAULT 0",
+            }.items():
+                if column_name in existing_columns:
+                    continue
+                conn.execute(
+                    text(
+                        "ALTER TABLE manufacturing_event_json "
+                        f"ADD COLUMN {column_name} {definition}",
+                    ),
+                )
             conn.execute(
                 text(
                     "ALTER TABLE manufacturing_event_json "
@@ -86,8 +102,23 @@ class SampleDbSchemaManager:
                     "MODIFY COLUMN analysis_status "
                     "ENUM('NOT_ANALYZED','NORMAL','ABNORMAL') "
                     "NOT NULL DEFAULT 'NOT_ANALYZED', "
+                    "MODIFY COLUMN bottleneck_analysis_done "
+                    "TINYINT(1) NOT NULL DEFAULT 0, "
+                    "MODIFY COLUMN defect_transfer_analysis_done "
+                    "TINYINT(1) NOT NULL DEFAULT 0, "
                     "MODIFY COLUMN updated_at DATETIME NOT NULL "
                     "DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+                ),
+            )
+            conn.execute(
+                text(
+                    "UPDATE manufacturing_event_json "
+                    "SET bottleneck_analysis_done = "
+                    "CASE WHEN LOWER(CAST(bottleneck_analysis_done AS CHAR)) IN "
+                    "('1', 'true') THEN 1 ELSE 0 END, "
+                    "defect_transfer_analysis_done = "
+                    "CASE WHEN LOWER(CAST(defect_transfer_analysis_done AS CHAR)) IN "
+                    "('1', 'true') THEN 1 ELSE 0 END",
                 ),
             )
 

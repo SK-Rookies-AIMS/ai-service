@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from datetime import date as DateType, datetime
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -17,6 +22,9 @@ class DefectTransferPredictionPage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     content: list[DefectTransferPredictionItem]
+    date: DateType | None = None
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
     has_next: bool = Field(alias="hasNext")
     next_cursor: int | None = Field(alias="nextCursor")
 
@@ -30,6 +38,7 @@ class DefectTransferCauseItem(BaseModel):
     value: str
     impact: float
     message: str
+    main_causes: list[dict[str, Any]] = Field(default_factory=list, alias="mainCauses")
 
 
 class DefectTransferCausePage(BaseModel):
@@ -43,5 +52,8 @@ class DefectTransferCausePage(BaseModel):
     predicted_defect_process: str | None = Field(alias="predictedDefectProcess")
     transfer_probability: int | None = Field(alias="transferProbability")
     content: list[DefectTransferCauseItem]
+    date: DateType | None = None
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
     has_next: bool = Field(alias="hasNext")
     next_cursor: int | None = Field(alias="nextCursor")
