@@ -305,6 +305,8 @@ class ManufacturingEventJsonBuilder:
                     # 정상 분석 결과를 받은 뒤 Consumer가 READY로 전환한다.
                     "dispatch_status": initial_dispatch_status(process_code),
                     "analysis_status": "NOT_ANALYZED",
+                    "bottleneck_analysis_done": False,
+                    "defect_transfer_analysis_done": False,
                     "retry_count": 0,
                     "error_message": None,
                 }

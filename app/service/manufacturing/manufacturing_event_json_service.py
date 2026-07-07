@@ -940,6 +940,8 @@ def _materialize_template_row(
         # 재생된 이벤트도 최초 공정 제어 규칙을 그대로 따른다.
         "dispatch_status": initial_dispatch_status(str(row["process_code"])),
         "analysis_status": "NOT_ANALYZED",
+        "bottleneck_analysis_done": False,
+        "defect_transfer_analysis_done": False,
         "retry_count": 0,
         "error_message": None,
     }

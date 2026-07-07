@@ -1,5 +1,5 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -8,9 +8,7 @@ from datetime import datetime
 from threading import Event, Lock
 from typing import Any
 from uuid import uuid4
-
 from fastapi import FastAPI
-
 from app.core.config import settings
 from app.kafka.iam_provider import MSKTokenProvider
 from app.ml.inference.defect_transfer_detector import (
@@ -25,12 +23,9 @@ from app.repository.sampledb_repository import SampleDbRepository
 from app.service.analysis.bottleneck_service import BottleneckAnalysisService
 from app.utils.datetime_utils import seoul_now_iso
 from app.websocket.analysis_manager import analysis_websocket_manager
-
-
 logger = logging.getLogger(__name__)
 PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
-
-# assembly-service의 app.kafka.topics.raw.name과 동일한 실제 raw 토픽명.
+# assembly-service의 app.kafka.topics.raw.name과 동일한 raw 토픽.
 RAW_TOPIC = "factory.manufacturing.raw"
 ANALYSIS_TOPIC = "factory.manufacturing.analysis"
 RAW_CONSUMER_GROUP_ID = "ai-analysis-consumer-group"
@@ -40,7 +35,7 @@ _bottleneck_analysis_lock = Lock()
 
 
 def start_raw_event_consumer(app: FastAPI) -> None:
-    """FastAPI startup 시 제조 raw Kafka consumer를 백그라운드 thread로 시작한다."""
+    """FastAPI startup 시 raw Kafka consumer를 백그라운드 thread로 실행한다."""
     bootstrap_servers = _bootstrap_servers()
     if not bootstrap_servers:
         logger.info("Kafka bootstrap servers are not set. Raw Kafka consumer is disabled.")
@@ -48,7 +43,6 @@ def start_raw_event_consumer(app: FastAPI) -> None:
     if not settings.sample_database_connection_url:
         logger.info("SAMPLE_DB_NAME is not set. Raw Kafka consumer is disabled.")
         return
-
     stop_event = Event()
     tasks = [
         asyncio.create_task(
@@ -61,13 +55,13 @@ def start_raw_event_consumer(app: FastAPI) -> None:
         )
         for consumer_index in range(1, RAW_CONSUMER_CONCURRENCY + 1)
     ]
-    # shutdown 이벤트에서 thread consumer loop를 안전하게 종료하기 위한 공유 신호.
+    # shutdown 시 백그라운드 thread consumer loop를 종료하기 위한 상태를 저장한다.
     app.state.raw_event_consumer_stop_event = stop_event
     app.state.raw_event_consumer_tasks = tasks
 
 
 async def stop_raw_event_consumer(app: FastAPI) -> None:
-    """FastAPI shutdown 시 consumer loop 종료 신호를 보내고 thread 종료를 기다린다."""
+    """FastAPI shutdown 시 consumer loop 종료 신호를 보내고 thread 작업을 정리한다."""
     tasks = getattr(app.state, "raw_event_consumer_tasks", None)
     if not tasks:
         return
@@ -87,8 +81,7 @@ def _run_raw_event_consumer(
     except ModuleNotFoundError:
         logger.exception("kafka-python is required to consume manufacturing raw events.")
         return
-
-    # 기존 품질 Kafka 연동과 동일하게 MSK IAM 인증(SASL_SSL/OAUTHBEARER)을 사용한다.
+    # 운영 Kafka 연결에서는 MSK IAM 인증(SASL_SSL/OAUTHBEARER)을 사용한다.
     consumer = KafkaConsumer(
         RAW_TOPIC,
         ssl_context=ssl.create_default_context(),
@@ -110,7 +103,6 @@ def _run_raw_event_consumer(
         KafkaProducer,
         bootstrap_servers,
     )
-
     logger.info(
         "Raw Kafka consumer started: topic=%s group=%s concurrency=%s/%s bootstrap=%s auth=SASL_SSL/OAUTHBEARER",
         RAW_TOPIC,
@@ -141,7 +133,7 @@ def _run_raw_event_consumer(
                         record.offset,
                     )
                 finally:
-                    # DB 저장 시도 후 offset을 커밋해 재기동 시 같은 메시지의 무한 재처리를 막는다.
+                    # DB 저장/분석 실패 여부와 관계없이 offset을 커밋해 같은 메시지의 무한 재처리를 막는다.
                     consumer.commit()
     except Exception:
         logger.exception("Raw Kafka consumer failed.")
@@ -173,17 +165,59 @@ def _consume_record(
         [row],
         update_existing=True,
     )
-    bottleneck_summaries = _refresh_bottleneck_analysis(
-        analysis_service,
-        record,
-        row,
-    )
-    defect_prediction = _predict_defect_transfer(defect_detector, row)
-    defect_rows_saved = _save_defect_transfer_prediction(
-        defect_result_repository,
-        row,
-        defect_prediction,
-    )
+    if not _should_analyze_row(row):
+        logger.info(
+            "Kafka raw event skipped because dispatch_status/is_sent do not match analysis condition: "
+            "topic=%s partition=%s offset=%s key=%s event_id=%s dispatch_status=%s is_sent=%s",
+            record.topic,
+            record.partition,
+            record.offset,
+            raw_event.get("_kafka_key"),
+            row["event_id"],
+            row.get("dispatch_status"),
+            row.get("is_sent"),
+        )
+        return
+    bottleneck_summaries: list[dict[str, Any]] = []
+    defect_prediction: DefectTransferPrediction | None = None
+    defect_rows_saved = 0
+    analysis_ran = False
+    if not repository.events.is_bottleneck_analysis_done(row["event_id"]):
+        bottleneck_summaries = _refresh_bottleneck_analysis(
+            analysis_service,
+            record,
+            row,
+        )
+        if bottleneck_summaries is not None:
+            repository.events.mark_bottleneck_analysis_done(row["event_id"])
+            analysis_ran = True
+    if not repository.events.is_defect_transfer_analysis_done(row["event_id"]):
+        if (
+            defect_result_repository is not None
+            and defect_result_repository.has_prediction_for_event(row["event_id"])
+        ):
+            repository.events.mark_defect_transfer_analysis_done(row["event_id"])
+        else:
+            defect_prediction = _predict_defect_transfer(defect_detector, row)
+            defect_rows_saved = _save_defect_transfer_prediction(
+                defect_result_repository,
+                row,
+                defect_prediction,
+            )
+            if defect_rows_saved > 0:
+                repository.events.mark_defect_transfer_analysis_done(row["event_id"])
+                analysis_ran = True
+    if not analysis_ran:
+        logger.info(
+            "Kafka raw event skipped because it was already analyzed: "
+            "topic=%s partition=%s offset=%s key=%s event_id=%s",
+            record.topic,
+            record.partition,
+            record.offset,
+            raw_event.get("_kafka_key"),
+            row["event_id"],
+        )
+        return
     analysis_published = _publish_bottleneck_analysis_event(
         analysis_producer,
         raw_event,
@@ -191,7 +225,7 @@ def _consume_record(
         bottleneck_summaries,
         defect_prediction,
     )
-    # 새 raw 이벤트와 자동 분석 결과가 반영되면 Redis 캐시를 비운다.
+    # raw 이벤트 연동 분석 결과가 반영되면 Redis 캐시를 비운다.
     _clear_bottleneck_cache()
     _clear_defect_transfer_cache()
     _broadcast_process_analysis_updates(
@@ -242,7 +276,6 @@ def _broadcast_process_analysis_updates(
             "resultCount": len(bottleneck_summaries),
         },
     )
-
     analysis_websocket_manager.broadcast_from_thread(
         {
             **base_message,
@@ -281,7 +314,6 @@ def _vehicle_id_for_car_master_id(
     car_master_id: int,
 ) -> str | None:
     from sqlalchemy import select
-
     try:
         query = select(car_master.c.vehicle_id).where(car_master.c.id == car_master_id)
         with repository.engine.connect() as conn:
@@ -296,15 +328,13 @@ def _vehicle_id_for_car_master_id(
 
 
 def _parse_raw_event(record: Any) -> dict[str, Any]:
-    """Kafka record의 value JSON과 key(carId)를 분석하기 쉬운 dict로 정규화한다."""
+    """Kafka record의 value JSON과 key(carId)를 파싱해 dict로 반환한다."""
     payload = json.loads(record.value.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Manufacturing raw event must be a JSON object.")
-
     event_json = _parse_event_json(payload.get("eventJson") or payload.get("event_json"))
     if event_json is None:
         raise ValueError("Manufacturing raw event must include eventJson object.")
-
     key_text = record.key.decode("utf-8") if record.key else None
     payload["eventJson"] = event_json
     payload["_kafka_key"] = key_text
@@ -312,7 +342,7 @@ def _parse_raw_event(record: Any) -> dict[str, Any]:
 
 
 def _raw_event_to_row(raw_event: dict[str, Any]) -> dict[str, Any]:
-    """assembly-service raw envelope를 manufacturing_event_json 테이블 컬럼으로 매핑한다."""
+    """assembly-service raw envelope를 manufacturing_event_json 저장 형식으로 변환한다."""
     event_json = raw_event["eventJson"]
     process_code = _normalize_process_code(
         _first_present(raw_event, "processCode", "process_code", "PROCESS_CODE"),
@@ -324,7 +354,6 @@ def _raw_event_to_row(raw_event: dict[str, Any]) -> dict[str, Any]:
     )
     if not event_id:
         raise ValueError("Manufacturing raw event requires eventId.")
-
     car_master_id = _nullable_int(
         _first_present(raw_event, "carMasterId", "car_master_id", "carId", "car_id"),
     )
@@ -335,7 +364,6 @@ def _raw_event_to_row(raw_event: dict[str, Any]) -> dict[str, Any]:
         car_master_id = _nullable_int(raw_event.get("_kafka_key"))
     if car_master_id is None:
         raise ValueError(f"Manufacturing raw event requires carId key or carMasterId. event_id={event_id}")
-
     equipment_id = _nullable_int(
         _first_present(raw_event, "equipmentId", "equipment_id"),
     ) or 0
@@ -355,7 +383,7 @@ def _raw_event_to_row(raw_event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_process_code(value: Any, event_json: dict[str, Any]) -> str:
-    """PRESS/BODY/PAINT/ASSEMBLY 중 하나로 공정 코드를 표준화한다."""
+    """PRESS/BODY/PAINT/ASSEMBLY 중 하나의 공정 코드로 정규화한다."""
     process_code = str(value or "").strip().upper()
     if not process_code:
         process_data = event_json.get("processData")
@@ -492,7 +520,6 @@ def _create_analysis_producer(
             "Bottleneck results will still be stored in DB.",
         )
         return None
-
     logger.info(
         "Kafka analysis producer started: topic=%s bootstrap=%s auth=SASL_SSL/OAUTHBEARER",
         ANALYSIS_TOPIC,
@@ -508,7 +535,6 @@ def _refresh_bottleneck_analysis(
 ) -> list[dict[str, Any]]:
     if analysis_service is None:
         return []
-
     with _bottleneck_analysis_lock:
         try:
             summaries = analysis_service.refresh_results_from_events()
@@ -523,7 +549,6 @@ def _refresh_bottleneck_analysis(
                 row.get("process_code"),
             )
             return []
-
     logger.info(
         "Bottleneck analysis refreshed after raw Kafka event: "
         "topic=%s partition=%s offset=%s event_id=%s process_code=%s result_count=%s",
@@ -534,7 +559,7 @@ def _refresh_bottleneck_analysis(
         row.get("process_code"),
         len(summaries),
     )
-    return summaries
+    return summaries or []
 
 
 def _publish_bottleneck_analysis_event(
@@ -546,7 +571,6 @@ def _publish_bottleneck_analysis_event(
 ) -> bool:
     if producer is None:
         return False
-
     event = _build_bottleneck_analysis_event(
         raw_event,
         row,
@@ -564,7 +588,6 @@ def _publish_bottleneck_analysis_event(
             row.get("event_id"),
         )
         return False
-
     logger.info(
         "Bottleneck analysis event published: topic=%s partition=%s offset=%s "
         "key=%s event_id=%s analysis_id=%s analysis_type=%s",
@@ -652,7 +675,6 @@ def _build_bottleneck_analysis_event(
         )
         > 0
     )
-
     return {
         "analysisId": f"ANL-{uuid4()}",
         "eventId": row["event_id"],
@@ -831,7 +853,6 @@ def _format_predicted_defect_process(
         equipment_code_for_car_process,
         format_process_with_line,
     )
-
     source_code = str(row.get("process_code") or "").strip().upper()
     normalized = str(process_code).strip().upper()
     if normalized == source_code:
@@ -842,6 +863,20 @@ def _format_predicted_defect_process(
             process_code=normalized,
         )
     return format_process_with_line(normalized, equipment_code)
+
+
+def _should_analyze_row(row: dict[str, Any]) -> bool:
+    return str(row.get("dispatch_status") or "").upper() == "SENT" and _analysis_flag_is_true(
+        row.get("is_sent"),
+    )
+
+
+def _analysis_flag_is_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() == "true"
 
 
 def _source_equipment_code(row: dict[str, Any]) -> str | None:
@@ -857,7 +892,7 @@ def _matching_bottleneck_summary(
     process_code: str,
     equipment_code: str,
 ) -> dict[str, Any] | None:
-    for summary in summaries:
+    for summary in summaries or []:
         if (
             str(summary.get("process_code")) == process_code
             and str(summary.get("equipment_code")) == equipment_code
@@ -894,7 +929,6 @@ def _defect_probability(event_json: dict[str, Any], process_code: str) -> float:
     vibration = sensor.get("vibration", {})
     robot = sensor.get("robotArmVibration", {})
     thermal = sensor.get("thermal", {})
-
     if process_code == "PAINT":
         paint = process_data.get("paint", {})
         defect_score = _safe_float(paint.get("defectScore"), default=0.0)
@@ -905,7 +939,6 @@ def _defect_probability(event_json: dict[str, Any], process_code: str) -> float:
             default=100.0,
         )
         return round(max(defect_score, max(0.0, 100.0 - surface_quality) / 100.0), 4)
-
     if process_code == "ASSEMBLY":
         assembly = process_data.get("assembly", {})
         error_count = (
@@ -915,10 +948,9 @@ def _defect_probability(event_json: dict[str, Any], process_code: str) -> float:
         )
         if error_count == 0:
             return 0.0
-        # 에러 건수당 불량 확률을 현실적으로 조정 (너무 쉽게 1.0(100%)이 되지 않도록 함)
-        # 에러 1건당 약 8%씩 추가되며, 기본 50%의 위험도를 갖게 하여 최대 98% 내외로 산출
+        # 오류 건수에 따라 불량 확률을 현실적으로 조정한다.
+        # 오류 1건당 약 8%를 추가하고, 기본 50% 위험도를 부여해 최대 98% 내외로 산출한다.
         return round(min(error_count * 0.08 + 0.50, 0.98), 4)
-
     vibration_score = max(
         _safe_float(vibration.get("vibrationScore"), default=0.0),
         _safe_float(robot.get("vibrationScore"), default=0.0),
@@ -954,9 +986,9 @@ def _bottleneck_reason(
     if is_equipment_fault:
         return "설비 상태값에서 고장 또는 정지 위험이 감지되었습니다."
     if is_sequence_error:
-        return "의장 공정의 작업 순서 오류가 감지되었습니다."
+        return "의장 공정에서 작업 순서 오류가 감지되었습니다."
     if risk_score >= 3:
-        return "Rule Engine과 Isolation Forest 기준 병목 위험이 감지되었습니다."
+        return "Rule Engine과 Isolation Forest 기준으로 병목 위험이 감지되었습니다."
     if delay_time > 0:
         return "공정 지연 시간이 감지되었지만 위험도는 낮습니다."
     return "주요 병목 지표가 정상 범위입니다."
@@ -1004,10 +1036,8 @@ def _json_default(value: Any) -> str:
 def _clear_bottleneck_cache() -> None:
     if not settings.redis_url:
         return
-
     try:
         from redis import Redis
-
         redis_client = Redis.from_url(settings.redis_connection_url, decode_responses=True)
         pattern = f"{settings.redis_key_prefix}:process:bottleneck:*"
         keys = list(redis_client.scan_iter(match=pattern))
@@ -1020,10 +1050,8 @@ def _clear_bottleneck_cache() -> None:
 def _clear_defect_transfer_cache() -> None:
     if not settings.redis_url:
         return
-
     try:
         from redis import Redis
-
         redis_client = Redis.from_url(settings.redis_connection_url, decode_responses=True)
         pattern = f"{settings.redis_key_prefix}:process:defect-transfer:*"
         keys = list(redis_client.scan_iter(match=pattern))

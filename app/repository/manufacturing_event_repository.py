@@ -59,6 +59,12 @@ class ManufacturingEventRepository:
                         str(row["process_code"]),
                     ),
                     "analysis_status": row.get("analysis_status", "NOT_ANALYZED"),
+                    "bottleneck_analysis_done": _analysis_flag_value(
+                        row.get("bottleneck_analysis_done", False),
+                    ),
+                    "defect_transfer_analysis_done": _analysis_flag_value(
+                        row.get("defect_transfer_analysis_done", False),
+                    ),
                     "is_sent": row.get("is_sent", False),
                     "retry_count": row.get("retry_count", 0),
                     "error_message": row.get("error_message"),
@@ -94,7 +100,13 @@ class ManufacturingEventRepository:
                     "equipment_id": row["equipment_id"],
                     "event_json": event_json,
                     "dispatch_status": "SENT",
-                    "is_sent": True,
+                    "bottleneck_analysis_done": _analysis_flag_value(
+                        row.get("bottleneck_analysis_done", False),
+                    ),
+                    "defect_transfer_analysis_done": _analysis_flag_value(
+                        row.get("defect_transfer_analysis_done", False),
+                    ),
+                    "is_sent": _is_true_flag(row.get("is_sent", True)),
                     "retry_count": row.get("retry_count", 0),
                     "error_message": row.get("error_message"),
                     "updated_at": now,
@@ -161,12 +173,37 @@ class ManufacturingEventRepository:
                     ),
                 ).mappings()
             }
+            existing_rows = {
+                row["event_id"]: row
+                for row in conn.execute(
+                    select(manufacturing_event_json).where(
+                        manufacturing_event_json.c.event_id.in_(event_ids),
+                    ),
+                ).mappings()
+            }
 
             updated_rows = 0
             if update_existing:
                 for row in payload:
                     if row["event_id"] not in existing_ids:
                         continue
+                    existing_row = existing_rows.get(row["event_id"])
+                    if existing_row is not None:
+                        row = {
+                            **row,
+                            "analysis_status": existing_row.get(
+                                "analysis_status",
+                                row.get("analysis_status"),
+                            ),
+                            "bottleneck_analysis_done": existing_row.get(
+                                "bottleneck_analysis_done",
+                                row.get("bottleneck_analysis_done"),
+                            ),
+                            "defect_transfer_analysis_done": existing_row.get(
+                                "defect_transfer_analysis_done",
+                                row.get("defect_transfer_analysis_done"),
+                            ),
+                        }
                     result = conn.execute(
                         manufacturing_event_json.update()
                         .where(
@@ -229,6 +266,76 @@ class ManufacturingEventRepository:
 
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(query).mappings()]
+
+    def get_analysis_flags(self, event_id: str) -> dict[str, bool] | None:
+        query = select(
+            manufacturing_event_json.c.event_id,
+            manufacturing_event_json.c.bottleneck_analysis_done,
+            manufacturing_event_json.c.defect_transfer_analysis_done,
+        ).where(manufacturing_event_json.c.event_id == event_id)
+        with self.engine.connect() as conn:
+            row = conn.execute(query).mappings().first()
+        if row is None:
+            return None
+        return {
+            "bottleneck_analysis_done": _is_true_flag(
+                row["bottleneck_analysis_done"],
+            ),
+            "defect_transfer_analysis_done": _is_true_flag(
+                row["defect_transfer_analysis_done"],
+            ),
+        }
+
+    def is_bottleneck_analysis_done(self, event_id: str) -> bool:
+        query = select(manufacturing_event_json.c.bottleneck_analysis_done).where(
+            manufacturing_event_json.c.event_id == event_id,
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(query).mappings().first()
+        return False if row is None else _is_true_flag(row["bottleneck_analysis_done"])
+
+    def is_defect_transfer_analysis_done(self, event_id: str) -> bool:
+        query = select(manufacturing_event_json.c.defect_transfer_analysis_done).where(
+            manufacturing_event_json.c.event_id == event_id,
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(query).mappings().first()
+        return False if row is None else _is_true_flag(row["defect_transfer_analysis_done"])
+
+    def mark_bottleneck_analysis_done(self, event_id: str) -> int:
+        return self._mark_analysis_done(
+            event_id,
+            bottleneck_analysis_done=True,
+        )
+
+    def mark_defect_transfer_analysis_done(self, event_id: str) -> int:
+        return self._mark_analysis_done(
+            event_id,
+            defect_transfer_analysis_done=True,
+        )
+
+    def _mark_analysis_done(self, event_id: str, **values: Any) -> int:
+        from sqlalchemy import func
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                manufacturing_event_json.update()
+                .where(manufacturing_event_json.c.event_id == event_id)
+                .values(**values, updated_at=func.current_timestamp()),
+            )
+        return int(result.rowcount or 0)
+
+
+def _analysis_flag_value(value: Any) -> bool:
+    return _is_true_flag(value)
+
+
+def _is_true_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() == "true"
 
 
 def _mysql_error_code(exc: OperationalError) -> int | None:

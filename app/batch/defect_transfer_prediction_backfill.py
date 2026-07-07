@@ -44,6 +44,7 @@ def backfill_defect_transfer_predictions(*, limit: int | None = None) -> dict[st
             manufacturing_event_json.c.process_code,
             manufacturing_event_json.c.event_json,
         )
+        .where(manufacturing_event_json.c.dispatch_status == "SENT")
         .where(manufacturing_event_json.c.is_sent.is_(True))
         .order_by(manufacturing_event_json.c.id.asc())
     )
