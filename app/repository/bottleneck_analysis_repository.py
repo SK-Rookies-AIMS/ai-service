@@ -40,36 +40,19 @@ class BottleneckAnalysisRepository:
         start_rank: int,
         end_rank: int,
     ) -> None:
-        payload = [{**row, "detected_at": detected_at} for row in rows]
-        payload_ranks = {int(row["rank_no"]) for row in payload}
-
-        from sqlalchemy import func
+        payload = [
+            {
+                key: value
+                for key, value in {**row, "detected_at": detected_at}.items()
+                if key != "id"
+            }
+            for row in rows
+        ]
+        if not payload:
+            return
 
         with self.engine.begin() as conn:
-            delete_query = (
-                self.table.delete()
-                .where(self.table.c.rank_no.between(start_rank, end_rank))
-                .where(func.date(self.table.c.detected_at) == func.current_date())
-            )
-            if payload_ranks:
-                delete_query = delete_query.where(
-                    self.table.c.rank_no.not_in(payload_ranks),
-                )
-            conn.execute(delete_query)
-
-            for row in payload:
-                update_values = {
-                    **row,
-                    "updated_at": func.current_timestamp(),
-                }
-                result = conn.execute(
-                    self.table.update()
-                    .where(self.table.c.rank_no == row["rank_no"])
-                    .where(func.date(self.table.c.detected_at) == func.current_date())
-                    .values(**update_values),
-                )
-                if not result.rowcount:
-                    conn.execute(self.table.insert(), row)
+            conn.execute(self.table.insert(), payload)
 
     def prune_results_after_rank(self, max_rank: int) -> None:
         from sqlalchemy import func
@@ -86,15 +69,26 @@ class BottleneckAnalysisRepository:
         cursor: int,
         size: int,
     ) -> list[dict[str, Any]]:
-        event_ids = self._event_ids_for_today()
-        if not event_ids:
+        snapshot_detected_at = self._latest_snapshot_detected_at()
+        if snapshot_detected_at is None:
             return []
 
         from sqlalchemy import select
 
         query = (
-            select(self.table)
-            .where(self.table.c.manufacturing_event_id.in_(event_ids))
+            select(
+                self.table.c.id,
+                self.table.c.manufacturing_event_id,
+                self.table.c.car_master_id,
+                self.table.c.process_code,
+                self.table.c.equipment_code,
+                self.table.c.rank_no,
+                self.table.c.avg_delay_time,
+                self.table.c.affected_vehicle_count,
+                self.table.c.risk_score,
+                self.table.c.detected_at,
+            )
+            .where(self.table.c.detected_at == snapshot_detected_at)
             .order_by(
                 self.table.c.rank_no.asc(),
                 self.table.c.id.asc(),
@@ -109,8 +103,8 @@ class BottleneckAnalysisRepository:
     def count_results(
         self,
     ) -> int:
-        event_ids = self._event_ids_for_today()
-        if not event_ids:
+        snapshot_detected_at = self._latest_snapshot_detected_at()
+        if snapshot_detected_at is None:
             return 0
 
         from sqlalchemy import func, select
@@ -118,7 +112,7 @@ class BottleneckAnalysisRepository:
         query = (
             select(func.count())
             .select_from(self.table)
-            .where(self.table.c.manufacturing_event_id.in_(event_ids))
+            .where(self.table.c.detected_at == snapshot_detected_at)
         )
         with self.engine.connect() as conn:
             return int(conn.execute(query).scalar_one())
@@ -183,6 +177,17 @@ class BottleneckAnalysisRepository:
         )
         with self.event_engine.connect() as conn:
             return [int(row[0]) for row in conn.execute(query).all()]
+
+    def _latest_snapshot_detected_at(self) -> datetime | None:
+        from sqlalchemy import func, select
+
+        query = (
+            select(func.max(self.table.c.detected_at))
+            .where(func.date(self.table.c.detected_at) == func.current_date())
+        )
+        with self.engine.connect() as conn:
+            value = conn.execute(query).scalar_one()
+        return value
 
     def mark_bottleneck_analysis_done(self, event_ids: Iterable[int]) -> int:
         event_ids = [int(event_id) for event_id in event_ids]
