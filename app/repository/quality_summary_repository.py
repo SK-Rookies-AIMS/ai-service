@@ -38,6 +38,11 @@ def run(stop_event):
                             MAX(created_at) AS created_at
 
                         FROM inspection_drive_detail
+
+                        WHERE DATE(created_at) = (
+                            SELECT DATE(MAX(created_at))
+                            FROM inspection_drive_detail
+                        )
                     """)
                 ).mappings().first()
 
@@ -159,7 +164,6 @@ def run(stop_event):
 
 
 if __name__ == "__main__":
-
     import threading
 
     run(threading.Event())
