@@ -15,6 +15,7 @@ from app.kafka.iam_provider import MSKTokenProvider
 from app.ml.inference.defect_transfer_detector import (
     DefectTransferDetector,
     DefectTransferPrediction,
+    has_only_model_probability_cause,
 )
 from app.repository.defect_transfer_prediction_repository import (
     DefectTransferPredictionRepository,
@@ -215,6 +216,21 @@ def _consume_record(
             repository.events.mark_defect_transfer_analysis_done(row["event_id"])
         else:
             defect_prediction = _predict_defect_transfer(defect_detector, row)
+            if (
+                defect_prediction is not None
+                and has_only_model_probability_cause(defect_prediction.causes)
+            ):
+                logger.info(
+                    "Skipped defect transfer storage and analysis publish because only fallback model probability cause was produced: "
+                    "topic=%s partition=%s offset=%s key=%s event_id=%s process_code=%s",
+                    record.topic,
+                    record.partition,
+                    record.offset,
+                    raw_event.get("_kafka_key"),
+                    row["event_id"],
+                    row["process_code"],
+                )
+                return
             defect_rows_saved = _save_defect_transfer_prediction(
                 defect_result_repository,
                 row,

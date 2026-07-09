@@ -46,6 +46,15 @@ class DefectTransferPrediction:
     feature_values: dict[str, Any]
 
 
+def has_only_model_probability_cause(causes: list[DefectCause]) -> bool:
+    """Return True when the detector produced only the fallback model-probability cause."""
+    return (
+        len(causes) == 1
+        and causes[0].feature == "model_probability"
+        and causes[0].impact > 0
+    )
+
+
 class DefectTransferDetector:
     """Run event-level defect detection and adjacent-process transfer prediction."""
 
