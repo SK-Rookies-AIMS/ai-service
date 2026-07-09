@@ -18,18 +18,13 @@ def run(stop_event):
             os.getenv("BROKER_URL_1"),
             os.getenv("BROKER_URL_2")
         ],
-
         security_protocol="SASL_SSL",
-
         sasl_mechanism="OAUTHBEARER",
-
         sasl_oauth_token_provider=MSKTokenProvider(),
-
-        value_serializer=lambda x:
-            json.dumps(
-                x,
-                default=str
-            ).encode("utf-8")
+        value_serializer=lambda x: json.dumps(
+            x,
+            default=str
+        ).encode("utf-8")
     )
 
     last_id = 0
@@ -64,9 +59,25 @@ def run(stop_event):
                 if stop_event.is_set():
                     break
 
-                current_count = car["id"]
+                # ============================
+                # 해당 날짜 생산 차량 개수 계산
+                # ============================
+                with main_engine.connect() as conn:
 
-                # 생산이 모두 끝난 경우
+                    current_count = conn.execute(
+                        text("""
+                            SELECT COUNT(*)
+                            FROM inspection_master
+                            WHERE DATE(created_at) = DATE(:created_at)
+                              AND id <= :current_id
+                        """),
+                        {
+                            "created_at": car["created_at"],
+                            "current_id": car["id"]
+                        }
+                    ).scalar()
+
+                # 생산 완료
                 if current_count >= TOTAL_TARGET:
 
                     process_list = [
@@ -82,51 +93,30 @@ def run(stop_event):
 
                         (
                             "VISUAL",
-                            min(
-                                current_count,
-                                TOTAL_TARGET
-                            )
+                            min(current_count, TOTAL_TARGET)
                         ),
 
                         (
                             "FUNCTION",
-                            min(
-                                max(
-                                    current_count - 1,
-                                    0
-                                ),
-                                TOTAL_TARGET
-                            )
+                            min(max(current_count - 1, 0), TOTAL_TARGET)
                         ),
 
                         (
                             "DRIVE",
-                            min(
-                                max(
-                                    current_count - 2,
-                                    0
-                                ),
-                                TOTAL_TARGET
-                            )
+                            min(max(current_count - 2, 0), TOTAL_TARGET)
                         ),
 
                         (
                             "FINAL",
-                            min(
-                                max(
-                                    current_count - 3,
-                                    0
-                                ),
-                                TOTAL_TARGET
-                            )
+                            min(max(current_count - 3, 0), TOTAL_TARGET)
                         )
                     ]
 
                 for process_name, completed in process_list:
 
                     waiting = max(
-                        0,
-                        TOTAL_TARGET - completed
+                        TOTAL_TARGET - completed,
+                        0
                     )
 
                     progress_rate = round(
@@ -136,35 +126,27 @@ def run(stop_event):
 
                     if progress_rate >= 100:
                         process_status = "COMPLETE"
-
                     elif progress_rate == 0:
                         process_status = "WAIT"
-
                     else:
                         process_status = "RUNNING"
 
                     message = {
 
-                        "process_name":
-                            process_name,
+                        "process_name": process_name,
 
-                        "total_vehicle_count":
-                            TOTAL_TARGET,
+                        "total_vehicle_count": TOTAL_TARGET,
 
-                        "completed_count":
-                            completed,
+                        "completed_count": completed,
 
-                        "waiting_count":
-                            waiting,
+                        "waiting_count": waiting,
 
-                        "progress_rate":
-                            progress_rate,
+                        "progress_rate": progress_rate,
 
-                        "process_status":
-                            process_status,
+                        "process_status": process_status,
 
-                        "created_at":
-                            car["created_at"]
+                        "created_at": car["created_at"]
+
                     }
 
                     producer.send(
