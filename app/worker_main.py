@@ -4,6 +4,8 @@ import threading
 import time
 import signal
 import sys
+import logging
+import os
 
 from app.db import (
     main_dispose_engine,
@@ -24,6 +26,19 @@ from app.repository.quality_risk_trend_repository import run as trend_repository
 from app.repository.quality_process_repository import run as process_repository
 from app.repository.quality_summary_repository import run as summary_repository
 
+os.makedirs("logs", exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
+    handlers=[
+        logging.FileHandler("logs/worker.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
 # =========================
 # STOP FLAG (핵심)
 # =========================
@@ -36,7 +51,7 @@ threads = []
 # THREAD WRAPPER
 # =========================
 def start_thread(name, target):
-    print(f"[START] {name}")
+    logger.info(f"[START] {name}")
 
     thread = threading.Thread(
         target=lambda: target(stop_event),
@@ -59,13 +74,13 @@ def cleanup():
 
     cleanup_done = True
 
-    print("\n🧹 Graceful Shutdown 시작...")
+    logger.info("\n🧹 Graceful Shutdown 시작...")
 
     # 1. stop signal 전달
     stop_event.set()
 
     # 2. thread 종료 대기
-    print("⏳ threads join 중...")
+    logger.info("⏳ threads join 중...")
     for t in threads:
         try:
             t.join(timeout=5)
@@ -77,16 +92,16 @@ def cleanup():
         main_dispose_engine()
         sample_dispose_engine()
     except Exception as e:
-        print("DB dispose error:", e)
+        logger.info("DB dispose error:", e)
 
-    print("✅ Shutdown 완료")
+    logger.info("✅ Shutdown 완료")
 
 
 # =========================
 # SIGNAL HANDLER
 # =========================
 def handle_exit(signum, frame):
-    print("\n⚠️ 종료 신호 감지 (Ctrl+C)")
+    logger.info("\n⚠️ 종료 신호 감지 (Ctrl+C)")
     cleanup()
     sys.exit(0)
 
@@ -100,9 +115,9 @@ signal.signal(signal.SIGTERM, handle_exit)
 # =========================
 if __name__ == "__main__":
 
-    print("=" * 60)
-    print("🚀 AI-Service 시작")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("🚀 AI-Service 시작")
+    logger.info("=" * 60)
 
     # =====================
     # PRODUCERS
@@ -128,7 +143,7 @@ if __name__ == "__main__":
     # =====================
     #threads.append(start_thread("STOMP Client", stomp_client))
 
-    print("\n📡 서비스 실행 중... (Ctrl+C로 종료)")
+    logger.info("\n📡 서비스 실행 중... (Ctrl+C로 종료)")
 
     # =====================
     # BLOCKING LOOP (STOP EVENT 기반)
