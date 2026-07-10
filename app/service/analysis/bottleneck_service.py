@@ -14,12 +14,13 @@ from app.core.exceptions import AppException
 from app.dto.response import BottleneckAnalysisItem, BottleneckAnalysisPage
 from app.ml.inference.bottleneck_detector import BottleneckDetector
 from app.repository.bottleneck_analysis_repository import BottleneckAnalysisRepository
+from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.utils.datetime_utils import seoul_now
 from app.utils.json_utils import from_json, to_json
 
 
 DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
-BOTTLENECK_CACHE_VERSION = "v12"
+BOTTLENECK_CACHE_VERSION = "v13"
 PROCESS_CODE_LABELS = {
     "PRESS": "프레스",
     "BODY": "차체",
@@ -49,6 +50,7 @@ class BottleneckAnalysisService:
             database_url or settings.bottleneck_database_url,
             event_database_url=settings.sample_database_connection_url,
         )
+        self.search_repository = self._create_search_repository()
         self.detector = BottleneckDetector(self.model_path)
         self._redis_client: Any | None = None
 
@@ -60,10 +62,27 @@ class BottleneckAnalysisService:
     ) -> BottleneckAnalysisPage:
         size = max(1, min(size, 100))
         page = max(cursor or 0, 0)
-        rows = self.repository.list_results(
-            cursor=page,
-            size=size,
-        )
+        rows: list[dict[str, Any]]
+        has_next = False
+        if self.search_repository is not None:
+            try:
+                rows, has_next = self.search_repository.list_bottleneck_page(
+                    cursor=page,
+                    size=size,
+                )
+            except Exception:
+                logger.exception("Elasticsearch bottleneck query failed. Falling back to DB.")
+                rows = self.repository.list_results(
+                    cursor=page,
+                    size=size,
+                )
+                has_next = self.repository.count_results() > (page + 1) * size
+        else:
+            rows = self.repository.list_results(
+                cursor=page,
+                size=size,
+            )
+            has_next = self.repository.count_results() > (page + 1) * size
         if not rows:
             return BottleneckAnalysisPage(
                 mostBottleneckProcess=None,
@@ -74,8 +93,6 @@ class BottleneckAnalysisService:
             )
 
         top_row = rows[0]
-        total_count = self.repository.count_results()
-        has_next = total_count > (page + 1) * size
 
         return BottleneckAnalysisPage(
             mostBottleneckProcess=self._format_process_label(top_row["process_code"]),
@@ -238,6 +255,18 @@ class BottleneckAnalysisService:
         )
 
     @staticmethod
+    def _create_search_repository() -> ProcessAnalysisSearchRepository | None:
+        if not settings.elasticsearch_url:
+            return None
+        try:
+            repository = ProcessAnalysisSearchRepository()
+            repository.ensure_indices()
+            return repository
+        except Exception:
+            logger.exception("Elasticsearch bottleneck repository is unavailable.")
+            return None
+
+    @staticmethod
     def _rank_bottleneck_summaries(
         summaries: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
@@ -249,10 +278,25 @@ class BottleneckAnalysisService:
                 int(row.get("affected_vehicle_count") or 0),
                 int(row.get("manufacturing_event_id") or 0),
                 int(row.get("car_master_id") or 0),
+                str(row.get("process_code") or "").strip().upper(),
+                str(row.get("equipment_code") or "").strip().upper(),
             ),
             reverse=True,
         )
-        return [{**row, "rank_no": index + 1} for index, row in enumerate(ranked)]
+        deduped: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for row in ranked:
+            key = (
+                str(row.get("process_code") or "").strip().upper(),
+                str(row.get("equipment_code") or "").strip().upper(),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(row)
+
+        return [{**row, "rank_no": index + 1} for index, row in enumerate(deduped)]
 
     @staticmethod
     def _equipment_number(equipment_code: Any | None) -> int | None:

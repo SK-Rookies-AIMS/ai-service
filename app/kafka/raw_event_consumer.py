@@ -30,6 +30,7 @@ PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
 # assembly-service의 app.kafka.topics.raw.name과 동일한 raw 토픽.
 RAW_TOPIC = kafka_config.RAW_TOPIC
 ANALYSIS_TOPIC = kafka_config.ANALYSIS_TOPIC
+ANALYSIS_SYNC_TOPIC = kafka_config.ANALYSIS_SYNC_TOPIC
 RAW_CONSUMER_GROUP_ID = kafka_config.RAW_CONSUMER_GROUP_ID
 RAW_AUTO_OFFSET_RESET = kafka_config.AUTO_OFFSET_RESET
 RAW_CONSUMER_CONCURRENCY = kafka_config.RAW_CONSUMER_CONCURRENCY
@@ -257,6 +258,15 @@ def _consume_record(
         bottleneck_summaries,
         defect_prediction,
     )
+    sync_published = _publish_process_analysis_sync_events(
+        analysis_producer,
+        repository,
+        raw_event,
+        row,
+        bottleneck_summaries,
+        defect_prediction,
+        defect_rows_saved,
+    )
     # raw 이벤트 연동 분석 결과가 반영되면 Redis 캐시를 비운다.
     _clear_bottleneck_cache()
     _clear_defect_transfer_cache()
@@ -271,7 +281,8 @@ def _consume_record(
         "Kafka raw event consumed and stored: topic=%s partition=%s offset=%s "
         "key=%s event_id=%s manufacturing_event_id_source=manufacturing_event_json.id "
         "car_master_id=%s process_code=%s affected_rows=%s "
-        "bottleneck_result_count=%s defect_result_saved=%s analysis_topic_published=%s",
+        "bottleneck_result_count=%s defect_result_saved=%s analysis_topic_published=%s "
+        "analysis_sync_published=%s",
         record.topic,
         record.partition,
         record.offset,
@@ -283,6 +294,7 @@ def _consume_record(
         len(bottleneck_summaries),
         defect_rows_saved,
         analysis_published,
+        sync_published,
     )
 
 
@@ -634,6 +646,173 @@ def _publish_bottleneck_analysis_event(
     return True
 
 
+def _publish_process_analysis_sync_events(
+    producer: Any | None,
+    repository: SampleDbRepository,
+    raw_event: dict[str, Any],
+    row: dict[str, Any],
+    bottleneck_summaries: list[dict[str, Any]],
+    defect_prediction: DefectTransferPrediction | None,
+    defect_rows_saved: int,
+) -> bool:
+    if producer is None:
+        return False
+
+    published = False
+    if bottleneck_summaries:
+        bottleneck_event = _build_bottleneck_sync_event(
+            repository=repository,
+            raw_event=raw_event,
+            row=row,
+            summaries=bottleneck_summaries,
+        )
+        try:
+            producer.send(
+                ANALYSIS_SYNC_TOPIC,
+                key=f"bottleneck:{row['event_id']}",
+                value=bottleneck_event,
+            ).get(timeout=10)
+            published = True
+        except Exception:
+            logger.exception(
+                "Failed to publish bottleneck sync event: topic=%s event_id=%s",
+                ANALYSIS_SYNC_TOPIC,
+                row.get("event_id"),
+            )
+
+    if defect_prediction is not None and defect_rows_saved > 0:
+        defect_event = _build_defect_transfer_sync_event(
+            repository=repository,
+            raw_event=raw_event,
+            row=row,
+            prediction=defect_prediction,
+        )
+        try:
+            producer.send(
+                ANALYSIS_SYNC_TOPIC,
+                key=f"defect:{row['event_id']}",
+                value=defect_event,
+            ).get(timeout=10)
+            published = True
+        except Exception:
+            logger.exception(
+                "Failed to publish defect transfer sync event: topic=%s event_id=%s",
+                ANALYSIS_SYNC_TOPIC,
+                row.get("event_id"),
+            )
+
+    return published
+
+
+def _build_bottleneck_sync_event(
+    *,
+    repository: SampleDbRepository,
+    raw_event: dict[str, Any],
+    row: dict[str, Any],
+    summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    sync_id = f"SNAP-{uuid4()}"
+    detected_at = seoul_now_iso()
+    first_summary = summaries[0] if summaries else {}
+    return {
+        "syncId": sync_id,
+        "analysisType": "BOTTLENECK_ANALYSIS_SYNC",
+        "sourceService": "AI_SERVICE",
+        "detectedAt": detected_at,
+        "analyzedAt": detected_at,
+        "eventId": row["event_id"],
+        "carMasterId": row["car_master_id"],
+        "mostBottleneckProcess": first_summary.get("process_code"),
+        "mostBottleneckRiskLevel": _risk_level(float(first_summary.get("risk_score") or 0.0)),
+        "items": [
+            {
+                "manufacturingEventId": summary.get("manufacturing_event_id"),
+                "carMasterId": summary.get("car_master_id") or row["car_master_id"],
+                "processCode": summary.get("process_code"),
+                "equipmentCode": summary.get("equipment_code"),
+                "rankNo": summary.get("rank_no"),
+                "avgDelayTime": summary.get("avg_delay_time"),
+                "affectedVehicleCount": summary.get("affected_vehicle_count"),
+                "riskScore": summary.get("risk_score"),
+                "riskLevel": _risk_level(float(summary.get("risk_score") or 0.0)),
+            }
+            for summary in summaries
+        ],
+        "rawEvent": {
+            "eventId": row["event_id"],
+            "carMasterId": row["car_master_id"],
+            "processCode": row["process_code"],
+            "equipmentId": row.get("equipment_id"),
+            "vehicleId": _vehicle_id_for_car_master_id(repository, int(row["car_master_id"])),
+        },
+    }
+
+
+def _build_defect_transfer_sync_event(
+    *,
+    repository: SampleDbRepository,
+    raw_event: dict[str, Any],
+    row: dict[str, Any],
+    prediction: DefectTransferPrediction,
+) -> dict[str, Any]:
+    sync_id = f"SYNC-{uuid4()}"
+    predicted_at = seoul_now_iso()
+    vehicle_id = _vehicle_id_for_car_master_id(repository, int(row["car_master_id"]))
+    source_equipment_code = _source_equipment_code(row)
+    current_process = _format_current_process(row, source_equipment_code)
+    predicted_process = _format_predicted_defect_process(
+        prediction.predicted_process_code,
+        row,
+    )
+    causes = [
+        {
+            "rank": cause.rank,
+            "feature": cause.feature,
+            "label": cause.label,
+            "value": cause.value,
+            "impact": cause.impact,
+            "message": cause.message,
+        }
+        for cause in prediction.causes
+    ]
+    return {
+        "syncId": sync_id,
+        "analysisType": "DEFECT_TRANSFER_ANALYSIS_SYNC",
+        "sourceService": "AI_SERVICE",
+        "eventId": row["event_id"],
+        "carMasterId": row["car_master_id"],
+        "vehicleId": vehicle_id,
+        "currentProcessCode": prediction.current_process_code,
+        "currentProcess": current_process,
+        "sourceEquipmentCode": source_equipment_code,
+        "predictedDefectProcess": predicted_process,
+        "defectProbability": round(prediction.defect_probability * 100.0),
+        "currentDefectProbability": prediction.defect_probability,
+        "transferProbability": prediction.transfer_probability,
+        "defectThreshold": prediction.defect_threshold,
+        "transferThreshold": prediction.transfer_threshold,
+        "expectedStepsAfter": prediction.expected_steps_after,
+        "expectedTime": (
+            f"{prediction.expected_steps_after}단계 후"
+            if prediction.expected_steps_after is not None
+            else None
+        ),
+        "riskLevel": prediction.risk_level,
+        "predictedAt": predicted_at,
+        "createdAt": predicted_at,
+        "mainCauses": causes,
+        "causes": causes,
+        "featureValues": prediction.feature_values,
+        "rawEvent": {
+            "eventId": row["event_id"],
+            "carMasterId": row["car_master_id"],
+            "processCode": row["process_code"],
+            "equipmentId": row.get("equipment_id"),
+            "vehicleId": vehicle_id,
+        },
+    }
+
+
 def _build_bottleneck_analysis_event(
     raw_event: dict[str, Any],
     row: dict[str, Any],
@@ -895,6 +1074,15 @@ def _format_predicted_defect_process(
             process_code=normalized,
         )
     return format_process_with_line(normalized, equipment_code)
+
+
+def _format_current_process(
+    row: dict[str, Any],
+    equipment_code: str | None,
+) -> str:
+    from app.utils.process_label_utils import format_process_with_line
+
+    return format_process_with_line(row.get("process_code"), equipment_code)
 
 
 def _should_analyze_row(row: dict[str, Any]) -> bool:

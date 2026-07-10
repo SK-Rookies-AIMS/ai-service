@@ -1,7 +1,10 @@
 # kafka/config.py
 RAW_TOPIC = "factory.manufacturing.raw"
 ANALYSIS_TOPIC = "factory.manufacturing.analysis"
+# ES sync events reuse the existing analysis topic to avoid requiring an extra Kafka topic.
+ANALYSIS_SYNC_TOPIC = ANALYSIS_TOPIC
 RAW_CONSUMER_GROUP_ID = "ai-analysis-consumer-group"
+ANALYSIS_SYNC_CONSUMER_GROUP_ID = "ai-analysis-sync-consumer-group"
 RAW_CONSUMER_CONCURRENCY = 2
 AUTO_OFFSET_RESET = "earliest"
 
