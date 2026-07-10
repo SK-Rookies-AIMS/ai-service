@@ -14,6 +14,7 @@ from app.core.exceptions import AppException
 from app.dto.response import BottleneckAnalysisItem, BottleneckAnalysisPage
 from app.ml.inference.bottleneck_detector import BottleneckDetector
 from app.repository.bottleneck_analysis_repository import BottleneckAnalysisRepository
+from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.utils.datetime_utils import seoul_now
 from app.utils.json_utils import from_json, to_json
 
@@ -49,6 +50,7 @@ class BottleneckAnalysisService:
             database_url or settings.bottleneck_database_url,
             event_database_url=settings.sample_database_connection_url,
         )
+        self.search_repository = self._create_search_repository()
         self.detector = BottleneckDetector(self.model_path)
         self._redis_client: Any | None = None
 
@@ -60,10 +62,27 @@ class BottleneckAnalysisService:
     ) -> BottleneckAnalysisPage:
         size = max(1, min(size, 100))
         page = max(cursor or 0, 0)
-        rows = self.repository.list_results(
-            cursor=page,
-            size=size,
-        )
+        rows: list[dict[str, Any]]
+        has_next = False
+        if self.search_repository is not None:
+            try:
+                rows, has_next = self.search_repository.list_bottleneck_page(
+                    cursor=page,
+                    size=size,
+                )
+            except Exception:
+                logger.exception("Elasticsearch bottleneck query failed. Falling back to DB.")
+                rows = self.repository.list_results(
+                    cursor=page,
+                    size=size,
+                )
+                has_next = self.repository.count_results() > (page + 1) * size
+        else:
+            rows = self.repository.list_results(
+                cursor=page,
+                size=size,
+            )
+            has_next = self.repository.count_results() > (page + 1) * size
         if not rows:
             return BottleneckAnalysisPage(
                 mostBottleneckProcess=None,
@@ -74,8 +93,6 @@ class BottleneckAnalysisService:
             )
 
         top_row = rows[0]
-        total_count = self.repository.count_results()
-        has_next = total_count > (page + 1) * size
 
         return BottleneckAnalysisPage(
             mostBottleneckProcess=self._format_process_label(top_row["process_code"]),
@@ -236,6 +253,18 @@ class BottleneckAnalysisService:
             cursor=0,
             size=total_count,
         )
+
+    @staticmethod
+    def _create_search_repository() -> ProcessAnalysisSearchRepository | None:
+        if not settings.elasticsearch_url:
+            return None
+        try:
+            repository = ProcessAnalysisSearchRepository()
+            repository.ensure_indices()
+            return repository
+        except Exception:
+            logger.exception("Elasticsearch bottleneck repository is unavailable.")
+            return None
 
     @staticmethod
     def _rank_bottleneck_summaries(

@@ -107,6 +107,28 @@ class Settings(BaseSettings):
     redis_key_prefix: str = Field(default="aims:ai-service", alias="REDIS_KEY_PREFIX")
     redis_cache_ttl_seconds: int = Field(default=60, alias="REDIS_CACHE_TTL_SECONDS")
 
+    elasticsearch_url: str | None = Field(default=None, alias="ELASTICSEARCH_URL")
+    elasticsearch_username: str | None = Field(
+        default=None,
+        alias="ELASTICSEARCH_USERNAME",
+    )
+    elasticsearch_password: str | None = Field(
+        default=None,
+        alias="ELASTICSEARCH_PASSWORD",
+    )
+    elasticsearch_verify_certs: bool = Field(
+        default=True,
+        alias="ELASTICSEARCH_VERIFY_CERTS",
+    )
+    elasticsearch_bottleneck_index: str = Field(
+        default="aims-bottleneck-analysis-v1",
+        alias="ELASTICSEARCH_BOTTLENECK_INDEX",
+    )
+    elasticsearch_defect_transfer_index: str = Field(
+        default="aims-defect-transfer-analysis-v1",
+        alias="ELASTICSEARCH_DEFECT_TRANSFER_INDEX",
+    )
+
     main_database_url: str | None = Field(default=None, alias="MAIN_DATABASE_URL")
     main_db_name: str | None = Field(default=None, alias="MAIN_DB_NAME")
     sample_db_name: str | None = Field(default=None, alias="SAMPLE_DB_NAME")

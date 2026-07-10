@@ -11,6 +11,10 @@ from app.kafka.raw_event_consumer import (
     start_raw_event_consumer,
     stop_raw_event_consumer,
 )
+from app.kafka.analysis_sync_consumer import (
+    start_analysis_sync_consumer,
+    stop_analysis_sync_consumer,
+)
 from app.repository.sampledb_repository import initialize_sampledb
 from app.scheduler.manufacturing import (
     start_manufacturing_event_scheduler,
@@ -78,9 +82,11 @@ def create_app() -> FastAPI:
                 logger.exception("미완료 제조 이벤트 생성 job 복구에 실패했습니다.")
         start_manufacturing_event_scheduler(app)
         start_raw_event_consumer(app)
+        start_analysis_sync_consumer(app)
 
     @app.on_event("shutdown")
     async def stop_background_schedulers() -> None:
+        await stop_analysis_sync_consumer(app)
         await stop_raw_event_consumer(app)
         await stop_manufacturing_event_scheduler(app)
 
