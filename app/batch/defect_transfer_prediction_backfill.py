@@ -8,7 +8,10 @@ from typing import Any
 from sqlalchemy import create_engine, select
 
 from app.core.config import settings
-from app.ml.inference.defect_transfer_detector import DefectTransferDetector
+from app.ml.inference.defect_transfer_detector import (
+    DefectTransferDetector,
+    has_only_model_probability_cause,
+)
 from app.repository.defect_transfer_prediction_repository import (
     DefectTransferPredictionRepository,
 )
@@ -63,6 +66,14 @@ def backfill_defect_transfer_predictions(*, limit: int | None = None) -> dict[st
                 _event_json(row["event_json"]),
                 str(row["process_code"]),
             )
+            if has_only_model_probability_cause(prediction.causes):
+                logger.info(
+                    "Skipped defect transfer backfill because only fallback model probability cause was produced: "
+                    "event_id=%s process_code=%s",
+                    row.get("event_id"),
+                    row.get("process_code"),
+                )
+                continue
             saved_rows += result_repository.replace_prediction_result(
                 event_id=str(row["event_id"]),
                 car_master_id=int(row["car_master_id"]),

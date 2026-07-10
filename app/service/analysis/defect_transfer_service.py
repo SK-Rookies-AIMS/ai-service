@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Any
 
@@ -17,11 +18,13 @@ from app.dto.response.defect_transfer_response import (
 from app.repository.defect_transfer_prediction_repository import (
     DefectTransferPredictionRepository,
 )
+from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.utils.json_utils import from_json, to_json
 from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
 
 
 DEFECT_TRANSFER_CACHE_VERSION = "v8"
+logger = logging.getLogger(__name__)
 
 
 class DefectTransferAnalysisService:
@@ -43,6 +46,7 @@ class DefectTransferAnalysisService:
             main_database_url,
             event_database_url=sample_database_url,
         )
+        self.search_repository = self._create_search_repository()
         self._redis_client: Any | None = None
 
     def get_cached_predictions(
@@ -118,13 +122,31 @@ class DefectTransferAnalysisService:
     ) -> DefectTransferPredictionPage:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
-        try:
-            rows, has_next = self.repository.list_prediction_page(
-                cursor=page,
-                size=safe_size,
-            )
-        except SQLAlchemyError as exc:
-            raise self._db_exception() from exc
+        rows: list[dict[str, Any]]
+        has_next = False
+        if self.search_repository is not None:
+            try:
+                rows, has_next = self.search_repository.list_defect_prediction_page(
+                    cursor=page,
+                    size=safe_size,
+                )
+            except Exception:
+                logger.exception("Elasticsearch defect prediction query failed. Falling back to DB.")
+                try:
+                    rows, has_next = self.repository.list_prediction_page(
+                        cursor=page,
+                        size=safe_size,
+                    )
+                except SQLAlchemyError as exc:
+                    raise self._db_exception() from exc
+        else:
+            try:
+                rows, has_next = self.repository.list_prediction_page(
+                    cursor=page,
+                    size=safe_size,
+                )
+            except SQLAlchemyError as exc:
+                raise self._db_exception() from exc
 
         return DefectTransferPredictionPage(
             content=[self._to_prediction_item(row) for row in rows],
@@ -169,14 +191,34 @@ class DefectTransferAnalysisService:
     ) -> DefectTransferCausePage:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
-        try:
-            selected, rows, has_next = self.repository.list_cause_page(
-                vehicle_id=vehicle_id,
-                cursor=page,
-                size=safe_size,
-            )
-        except SQLAlchemyError as exc:
-            raise self._db_exception() from exc
+        selected: dict[str, Any] | None
+        rows: list[dict[str, Any]]
+        has_next = False
+        if self.search_repository is not None:
+            try:
+                selected = self.search_repository.get_latest_defect_cause_document(
+                    vehicle_id=vehicle_id,
+                )
+                rows = [selected] if selected is not None else []
+            except Exception:
+                logger.exception("Elasticsearch defect cause query failed. Falling back to DB.")
+                try:
+                    selected, rows, has_next = self.repository.list_cause_page(
+                        vehicle_id=vehicle_id,
+                        cursor=page,
+                        size=safe_size,
+                    )
+                except SQLAlchemyError as exc:
+                    raise self._db_exception() from exc
+        else:
+            try:
+                selected, rows, has_next = self.repository.list_cause_page(
+                    vehicle_id=vehicle_id,
+                    cursor=page,
+                    size=safe_size,
+                )
+            except SQLAlchemyError as exc:
+                raise self._db_exception() from exc
 
         if selected is None:
             return DefectTransferCausePage(
@@ -192,7 +234,11 @@ class DefectTransferAnalysisService:
                 nextCursor=None,
             )
 
-        display_rows = [row for row in rows if self._is_displayable_cause(row)]
+        offset = page * safe_size
+        paged_rows = rows[offset : offset + safe_size]
+        display_rows = [row for row in paged_rows if self._is_displayable_cause(row)]
+        if has_next is False:
+            has_next = len(rows) > offset + safe_size
 
         return DefectTransferCausePage(
             vehicleId=str(selected.get("vehicle_id")),
@@ -362,6 +408,18 @@ class DefectTransferAnalysisService:
             "Defect transfer analysis query failed. Please check DB settings and permissions.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+    @staticmethod
+    def _create_search_repository() -> ProcessAnalysisSearchRepository | None:
+        if not settings.elasticsearch_url:
+            return None
+        try:
+            repository = ProcessAnalysisSearchRepository()
+            repository.ensure_indices()
+            return repository
+        except Exception:
+            logger.exception("Elasticsearch defect transfer repository is unavailable.")
+            return None
 
     def _cache_get(self, cache_key: str) -> str | None:
         if not settings.redis_url:
