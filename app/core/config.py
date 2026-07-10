@@ -103,13 +103,13 @@ class Settings(BaseSettings):
         alias="KAFKA_ANALYSIS_PRODUCER_LINGER_MS",
     )
 
-    jwt_secret_key: str | None = Field(
-        default=None,
+    jwt_secret_key: str = Field(
+        ...,
         alias="JWT_SECRET_KEY",
     )
 
     jwt_algorithm: str = Field(
-        default="HS512",
+        default="HS384",
         alias="JWT_ALGORITHM",
     )
 

@@ -35,6 +35,7 @@ class ManualService:
             temperature=0.2
         ).with_structured_output(ManualResponse)
 
+
     # ======================================================
     # MAIN ENTRY
     # ======================================================
