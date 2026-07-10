@@ -5,7 +5,7 @@ from jose import jwt
 import os
 
 router = APIRouter(
-    prefix="/manual",
+    prefix="/api/ai/manual",
     tags=["AI Manual"]
 )
 
