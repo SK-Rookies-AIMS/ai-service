@@ -73,6 +73,7 @@ class ManualService:
                 "process": event["process_code"],
                 "equipmentId": event["equipment_id"],
                 "riskScore": event["risk_score"],
+                "logNo": event["log_no"],
             },
             "manual": response.model_dump()
         }
