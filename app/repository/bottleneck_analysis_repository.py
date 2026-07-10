@@ -93,12 +93,14 @@ class BottleneckAnalysisRepository:
                 self.table.c.rank_no.asc(),
                 self.table.c.id.asc(),
             )
-            .offset(cursor * size)
-            .limit(size)
         )
 
         with self.engine.connect() as conn:
-            return [dict(row) for row in conn.execute(query).mappings()]
+            rows = [dict(row) for row in conn.execute(query).mappings()]
+
+        deduped = self._dedupe_rows(rows)
+        offset = cursor * size
+        return deduped[offset : offset + size]
 
     def count_results(
         self,
@@ -115,7 +117,12 @@ class BottleneckAnalysisRepository:
             .where(self.table.c.detected_at == snapshot_detected_at)
         )
         with self.engine.connect() as conn:
-            return int(conn.execute(query).scalar_one())
+            raw_count = int(conn.execute(query).scalar_one())
+
+        if raw_count <= 0:
+            return 0
+
+        return len(self.list_results(cursor=0, size=raw_count))
 
     def list_manufacturing_event_histories(self) -> list[dict[str, Any]]:
         from sqlalchemy import select, func
@@ -260,6 +267,45 @@ class BottleneckAnalysisRepository:
             "queue_length": self._safe_float(metrics.get("queueLength")),
             "wip_count": self._safe_float(metrics.get("wipCount")),
         }
+
+    @staticmethod
+    def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+
+        deduped: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for row in sorted(
+            rows,
+            key=lambda item: (
+                float(item.get("risk_score") or 0.0),
+                float(item.get("avg_delay_time") or 0.0),
+                int(item.get("affected_vehicle_count") or 0),
+                int(item.get("manufacturing_event_id") or 0),
+                int(item.get("car_master_id") or 0),
+                str(item.get("process_code") or "").strip().upper(),
+                str(item.get("equipment_code") or "").strip().upper(),
+                int(item.get("rank_no") or 0),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        ):
+            key = (
+                str(row.get("process_code") or "").strip().upper(),
+                str(row.get("equipment_code") or "").strip().upper(),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(row)
+
+        deduped.sort(
+            key=lambda item: (
+                int(item.get("rank_no") or 0),
+                int(item.get("id") or 0),
+            ),
+        )
+        return deduped
 
     @staticmethod
     def _event_json_dict(value: Any) -> dict[str, Any]:

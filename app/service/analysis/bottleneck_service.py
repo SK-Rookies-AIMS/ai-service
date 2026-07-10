@@ -19,7 +19,7 @@ from app.utils.json_utils import from_json, to_json
 
 
 DEFAULT_BOTTLENECK_MODEL_PATH = Path("app/ml/artifacts/bottleneck/bottleneck_iforest_model.pkl")
-BOTTLENECK_CACHE_VERSION = "v12"
+BOTTLENECK_CACHE_VERSION = "v13"
 PROCESS_CODE_LABELS = {
     "PRESS": "프레스",
     "BODY": "차체",
@@ -249,10 +249,25 @@ class BottleneckAnalysisService:
                 int(row.get("affected_vehicle_count") or 0),
                 int(row.get("manufacturing_event_id") or 0),
                 int(row.get("car_master_id") or 0),
+                str(row.get("process_code") or "").strip().upper(),
+                str(row.get("equipment_code") or "").strip().upper(),
             ),
             reverse=True,
         )
-        return [{**row, "rank_no": index + 1} for index, row in enumerate(ranked)]
+        deduped: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for row in ranked:
+            key = (
+                str(row.get("process_code") or "").strip().upper(),
+                str(row.get("equipment_code") or "").strip().upper(),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(row)
+
+        return [{**row, "rank_no": index + 1} for index, row in enumerate(deduped)]
 
     @staticmethod
     def _equipment_number(equipment_code: Any | None) -> int | None:
