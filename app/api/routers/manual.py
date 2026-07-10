@@ -29,7 +29,7 @@ def generate_manual(request: Request):
     payload = jwt.decode(
         token,
         os.getenv("JWT_SECRET_KEY"),
-        algorithms=["HS512"]
+        algorithms=["HS384"]
     )
 
     print(payload)
