@@ -22,10 +22,14 @@ from app.repository.defect_transfer_prediction_repository import (
 )
 from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.utils.json_utils import from_json, to_json
-from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
+from app.utils.process_label_utils import (
+    NEXT_PROCESS,
+    equipment_code_for_car_process,
+    format_process_with_line,
+)
 
 
-DEFECT_TRANSFER_CACHE_VERSION = "v10"
+DEFECT_TRANSFER_CACHE_VERSION = "v11"
 logger = logging.getLogger(__name__)
 
 
@@ -226,6 +230,13 @@ class DefectTransferAnalysisService:
                     vehicle_id=vehicle_id,
                     analysis_date=selected_date,
                 )
+                if selected is None:
+                    selected, _rows, _has_next = self.repository.list_cause_page(
+                        vehicle_id=vehicle_id,
+                        cursor=page,
+                        size=safe_size,
+                        analysis_date=selected_date,
+                    )
             except Exception:
                 logger.exception("Elasticsearch defect cause query failed. Falling back to DB.")
                 cached_value = self._cache_get(cache_key)
@@ -274,32 +285,29 @@ class DefectTransferAnalysisService:
                 nextCursor=None,
             )
 
-        cause_rows = self._build_cause_rows(selected)
-
+        representative_cause, detail_causes = self._build_cause_sections(selected)
         offset = page * safe_size
-        display_rows = cause_rows[offset : offset + safe_size]
-        has_next = len(cause_rows) > offset + safe_size
+        display_detail_causes = detail_causes[offset : offset + safe_size]
+        has_next = len(detail_causes) > offset + safe_size
 
         return DefectTransferCausePage(
             vehicleId=str(selected.get("vehicle_id")),
             carMasterId=int(selected["car_master_id"]),
-            predictedDefectProbability=self._result_probability(selected),
+            predictedDefectProbability=self._normalize_probability(
+                selected.get("target_defect_probability"),
+            ),
             riskLevel=selected.get("risk_grade"),
             currentProcess=format_process_with_line(
                 selected.get("source_process_code"),
                 selected.get("source_equipment_code"),
             ),
             predictedDefectProcess=self._resolve_predicted_defect_process(selected),
-            transferProbability=self._percent(selected.get("target_defect_probability")),
+            transferProbability=self._normalize_probability(selected.get("target_defect_probability")),
             date=selected_date,
             dateOptions=date_options,
-            content=[
-                self._to_cause_item(
-                    row,
-                    rank=index,
-                )
-                for index, row in enumerate(display_rows, page * safe_size + 1)
-            ],
+            content=[representative_cause],
+            representativeCause=representative_cause,
+            detailCauses=display_detail_causes,
             hasNext=has_next,
             nextCursor=page + 1 if has_next else None,
         )
@@ -326,37 +334,45 @@ class DefectTransferAnalysisService:
         )
 
     @staticmethod
-    def _percent(value: Any) -> int:
+    def _normalize_probability(value: Any) -> float:
         if value is None:
-            return 0
-        return round(float(value) * 100)
+            return 0.0
+        normalized = float(value)
+        if abs(normalized) > 1.0:
+            normalized /= 100.0
+        return round(normalized, 4)
 
     @classmethod
-    def _result_probability(cls, row: dict[str, Any]) -> int:
-        value = row.get("target_defect_probability")
+    def _result_probability(cls, row: dict[str, Any]) -> float:
+        value = row.get("current_defect_probability")
         if value is None:
-            value = row.get("current_defect_probability")
-        return cls._percent(value)
+            value = row.get("defect_probability")
+        if value is None:
+            value = row.get("target_defect_probability")
+        return cls._normalize_probability(value)
 
     @classmethod
     def _resolve_predicted_defect_process(cls, row: dict[str, Any]) -> str | None:
         if cls._result_probability(row) <= 0:
             return None
 
-        db_val = row.get("predicted_defect_process")
-        if db_val:
-            return db_val
-
         source_code = str(row.get("source_process_code") or "").strip().upper()
-        if row.get("target_defect_probability") is not None:
-            process_code = row.get("target_process_code") or NEXT_PROCESS.get(source_code)
-            equipment_code = row.get("target_equipment_code")
-        else:
-            process_code = row.get("source_process_code")
-            equipment_code = row.get("source_equipment_code")
-
+        process_code = row.get("target_process_code") or NEXT_PROCESS.get(source_code)
         if not process_code:
             return None
+        process_code = str(process_code).strip().upper()
+        if process_code == source_code:
+            equipment_code = row.get("source_equipment_code")
+        else:
+            equipment_code = row.get("target_equipment_code") or equipment_code_for_car_process(
+                car_master_id=int(row["car_master_id"]),
+                process_code=process_code,
+            )
+
+        db_val = row.get("predicted_defect_process")
+        if db_val and "(" in str(db_val) and ")" in str(db_val):
+            return str(db_val)
+
         return format_process_with_line(process_code, equipment_code)
 
     @staticmethod
@@ -401,26 +417,43 @@ class DefectTransferAnalysisService:
         return ""
 
     @classmethod
-    def _build_cause_rows(cls, row: dict[str, Any]) -> list[dict[str, Any]]:
+    def _build_cause_sections(
+        cls,
+        row: dict[str, Any],
+    ) -> tuple[DefectTransferCauseItem, list[DefectTransferCauseItem]]:
         main_causes = cls._normalize_main_causes(row.get("main_causes") or row.get("causes"))
         if main_causes:
-            return [
+            representative_cause = cls._to_cause_item(
                 {
-                    "rank": cause.get("rank") or index,
-                    "feature": cause.get("feature") or "main_causes",
-                    "label": cause.get("label") or cause.get("message") or "",
-                    "value": cause.get("value") or "",
-                    "impact": cause.get("impact") or 0.0,
-                    "message": cause.get("message") or cause.get("label") or "",
-                    "main_causes": main_causes,
-                }
-                for index, cause in enumerate(main_causes, start=1)
+                    "rank": main_causes[0].get("rank") or 1,
+                    "feature": main_causes[0].get("feature") or "main_causes",
+                    "label": main_causes[0].get("label") or main_causes[0].get("message") or "",
+                    "value": main_causes[0].get("value") or "",
+                    "impact": main_causes[0].get("impact") or 0.0,
+                    "message": main_causes[0].get("message") or main_causes[0].get("label") or "",
+                },
+                rank=1,
+            )
+            detail_causes = [
+                cls._to_cause_item(
+                    {
+                        "rank": cause.get("rank") or index,
+                        "feature": cause.get("feature") or "main_causes",
+                        "label": cause.get("label") or cause.get("message") or "",
+                        "value": cause.get("value") or "",
+                        "impact": cause.get("impact") or 0.0,
+                        "message": cause.get("message") or cause.get("label") or "",
+                    },
+                    rank=index,
+                )
+                for index, cause in enumerate(main_causes[1:], start=2)
             ]
+            return representative_cause, detail_causes
 
         summary_message = cls._primary_cause_message(row)
         if not summary_message:
             summary_message = "no main cause available"
-        return [
+        representative_cause = cls._to_cause_item(
             {
                 "rank": 1,
                 "feature": "main_causes",
@@ -428,9 +461,10 @@ class DefectTransferAnalysisService:
                 "value": "",
                 "impact": float(row.get("influence_score") or 0.0),
                 "message": summary_message,
-                "main_causes": [],
             },
-        ]
+            rank=1,
+        )
+        return representative_cause, []
 
     @staticmethod
     def _normalize_main_causes(causes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -467,26 +501,6 @@ class DefectTransferAnalysisService:
         *,
         rank: int,
     ) -> DefectTransferCauseItem:
-        main_causes = row.get("main_causes")
-        normalized_main_causes: list[dict[str, Any]] = []
-        if isinstance(main_causes, list):
-            for cause in main_causes:
-                if not isinstance(cause, dict):
-                    continue
-                message = str(cause.get("message") or cause.get("label") or "").strip()
-                if not message:
-                    continue
-                try:
-                    impact = float(cause.get("impact") or 0.0)
-                except (TypeError, ValueError):
-                    impact = 0.0
-                normalized_main_causes.append(
-                    {
-                        "message": message,
-                        "impact": impact,
-                    },
-                )
-
         message = str(row.get("message") or row.get("label") or "").strip()
         if not message:
             message = cls._primary_cause_message(row)
@@ -500,7 +514,6 @@ class DefectTransferAnalysisService:
             value=str(row.get("value") or ""),
             impact=float(row.get("impact") or 0.0),
             message=message,
-            main_causes=normalized_main_causes,
         )
 
     @staticmethod

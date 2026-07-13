@@ -128,6 +128,15 @@ class BottleneckAnalysisRepository:
 
         return len(self.list_results(cursor=0, size=raw_count))
 
+    def delete_results_by_date(self, analysis_date: DateType) -> int:
+        from sqlalchemy import func
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                self.table.delete().where(func.date(self.table.c.detected_at) == analysis_date),
+            )
+        return int(result.rowcount or 0)
+
     def list_manufacturing_event_histories(
         self,
         *,
@@ -275,6 +284,24 @@ class BottleneckAnalysisRepository:
                 .where(manufacturing_event_json.c.id.in_(event_ids))
                 .values(
                     bottleneck_analysis_done=True,
+                    updated_at=func.current_timestamp(),
+                ),
+            )
+        return int(result.rowcount or 0)
+
+    def reset_bottleneck_analysis_done(self, event_ids: Iterable[int]) -> int:
+        event_ids = [int(event_id) for event_id in event_ids]
+        if not event_ids:
+            return 0
+
+        from sqlalchemy import func
+
+        with self.event_engine.begin() as conn:
+            result = conn.execute(
+                manufacturing_event_json.update()
+                .where(manufacturing_event_json.c.id.in_(event_ids))
+                .values(
+                    bottleneck_analysis_done=False,
                     updated_at=func.current_timestamp(),
                 ),
             )

@@ -187,9 +187,10 @@ class BottleneckAnalysisService:
         merged_summaries = self._rank_bottleneck_summaries(
             self._current_bottleneck_results() + new_summaries,
         )
+        detected_at = self._analysis_detected_at(histories)
         self.repository.replace_results(
             merged_summaries,
-            detected_at=seoul_now().replace(tzinfo=None),
+            detected_at=detected_at,
             start_rank=1,
             end_rank=max(len(merged_summaries), 1),
         )
@@ -318,6 +319,17 @@ class BottleneckAnalysisService:
         if date_options:
             return date_options[0].date
         return None
+
+    @staticmethod
+    def _analysis_detected_at(histories: list[dict[str, Any]]) -> datetime:
+        candidates = [
+            value.replace(tzinfo=None) if isinstance(value, datetime) and value.tzinfo else value
+            for value in (row.get("event_time") for row in histories)
+            if isinstance(value, datetime)
+        ]
+        if candidates:
+            return max(candidates)
+        return seoul_now().replace(tzinfo=None)
 
     @staticmethod
     def _create_search_repository() -> ProcessAnalysisSearchRepository | None:

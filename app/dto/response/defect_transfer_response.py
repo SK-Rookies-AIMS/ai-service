@@ -15,7 +15,7 @@ class DefectTransferPredictionItem(BaseModel):
     car_master_id: int = Field(alias="carMasterId")
     current_process: str = Field(alias="currentProcess")
     predicted_defect_process: str | None = Field(alias="predictedDefectProcess")
-    defect_probability: int = Field(alias="defectProbability")
+    defect_probability: float = Field(alias="defectProbability")
     expected_time: str | None = Field(alias="expectedTime")
     risk_level: str = Field(alias="riskLevel")
 
@@ -41,7 +41,6 @@ class DefectTransferCauseItem(BaseModel):
     value: str
     impact: float
     message: str
-    main_causes: list[dict[str, Any]] = Field(default_factory=list, alias="mainCauses")
 
 
 class DefectTransferCausePage(BaseModel):
@@ -49,12 +48,14 @@ class DefectTransferCausePage(BaseModel):
 
     vehicle_id: str | None = Field(alias="vehicleId")
     car_master_id: int | None = Field(alias="carMasterId")
-    predicted_defect_probability: int | None = Field(alias="predictedDefectProbability")
+    predicted_defect_probability: float | None = Field(alias="predictedDefectProbability")
     risk_level: str | None = Field(alias="riskLevel")
     current_process: str | None = Field(alias="currentProcess")
     predicted_defect_process: str | None = Field(alias="predictedDefectProcess")
-    transfer_probability: int | None = Field(alias="transferProbability")
+    transfer_probability: float | None = Field(alias="transferProbability")
     content: list[DefectTransferCauseItem]
+    representative_cause: DefectTransferCauseItem | None = Field(default=None, alias="representativeCause")
+    detail_causes: list[DefectTransferCauseItem] = Field(default_factory=list, alias="detailCauses")
     date: DateType | None = None
     from_: datetime | None = Field(default=None, alias="from")
     to: datetime | None = None

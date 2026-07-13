@@ -96,7 +96,6 @@ class DefectTransferPredictionRepository:
             select(func.count())
             .select_from(self.table)
             .where(self.table.c.manufacturing_event_id == manufacturing_event_id)
-            .where(func.date(self.table.c.predicted_at) == func.current_date())
         )
         with self.engine.connect() as conn:
             return int(conn.execute(query).scalar_one()) > 0
@@ -118,7 +117,7 @@ class DefectTransferPredictionRepository:
         items = [
             row
             for row in latest_by_car.values()
-            if self._result_probability_percent(row) > 0
+            if self._result_probability(row) > 0
         ]
         items.sort(
             key=lambda row: (
@@ -135,6 +134,17 @@ class DefectTransferPredictionRepository:
         offset = cursor * size
         page = items[offset : offset + size]
         return page, len(items) > offset + size
+
+    def list_prediction_rows(
+        self,
+        *,
+        analysis_date: date | None = None,
+        car_master_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._all_prediction_rows(
+            car_master_id=car_master_id,
+            analysis_date=analysis_date,
+        )
 
     def list_cause_page(
         self,
@@ -260,7 +270,7 @@ class DefectTransferPredictionRepository:
         visible_latest_rows = [
             row
             for row in latest_by_car.values()
-            if self._result_probability_percent(row) > 0
+            if self._result_probability(row) > 0
         ]
 
         with self.engine.connect() as conn:
@@ -306,6 +316,15 @@ class DefectTransferPredictionRepository:
             "latestPredictionResult": self._json_ready_row(latest_prediction),
         }
 
+    def delete_predictions_by_date(self, analysis_date: date) -> int:
+        from sqlalchemy import func
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                self.table.delete().where(func.date(self.table.c.predicted_at) == analysis_date),
+            )
+        return int(result.rowcount or 0)
+
     def _all_prediction_rows(
         self,
         *,
@@ -325,6 +344,58 @@ class DefectTransferPredictionRepository:
         )
         with self.engine.connect() as conn:
             return [dict(row) for row in conn.execute(query).mappings()]
+
+    def list_prediction_source_events(
+        self,
+        *,
+        analysis_date: date | None = None,
+        car_master_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        from sqlalchemy import func, select
+
+        query = (
+            select(
+                manufacturing_event_json.c.id,
+                manufacturing_event_json.c.event_id,
+                manufacturing_event_json.c.event_time,
+                manufacturing_event_json.c.car_master_id,
+                manufacturing_event_json.c.process_code,
+                manufacturing_event_json.c.event_json,
+            )
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
+            .where(manufacturing_event_json.c.is_sent.is_(True))
+        )
+        if analysis_date is None:
+            query = query.where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+        else:
+            query = query.where(func.date(manufacturing_event_json.c.event_time) == analysis_date)
+        if car_master_id is not None:
+            query = query.where(manufacturing_event_json.c.car_master_id == car_master_id)
+        query = query.order_by(manufacturing_event_json.c.id.asc())
+        with self.event_engine.connect() as conn:
+            return [dict(row) for row in conn.execute(query).mappings()]
+
+    def delete_source_analysis_done_flags(
+        self,
+        *,
+        event_ids: list[int],
+        column_name: str,
+    ) -> int:
+        if not event_ids:
+            return 0
+
+        from sqlalchemy import func
+
+        if column_name not in {"bottleneck_analysis_done", "defect_transfer_analysis_done"}:
+            raise ValueError(f"Unsupported analysis flag column: {column_name}")
+
+        with self.event_engine.begin() as conn:
+            result = conn.execute(
+                manufacturing_event_json.update()
+                .where(manufacturing_event_json.c.id.in_(event_ids))
+                .values(**{column_name: False, "updated_at": func.current_timestamp()}),
+            )
+        return int(result.rowcount or 0)
 
     @staticmethod
     def _json_ready_row(row: Any | None) -> dict[str, Any] | None:
@@ -378,13 +449,24 @@ class DefectTransferPredictionRepository:
             return [int(row[0]) for row in conn.execute(query).all()]
 
     @staticmethod
-    def _result_probability_percent(row: dict[str, Any]) -> int:
-        value = row.get("target_defect_probability")
+    def _normalize_probability(value: Any) -> float:
         if value is None:
-            value = row.get("current_defect_probability")
+            return 0.0
+        normalized = float(value)
+        if abs(normalized) > 1.0:
+            normalized /= 100.0
+        return round(normalized, 4)
+
+    @classmethod
+    def _result_probability(cls, row: dict[str, Any]) -> float:
+        value = row.get("current_defect_probability")
         if value is None:
-            return 0
-        return round(float(value) * 100)
+            value = row.get("target_defect_probability")
+        if value is None:
+            value = row.get("defect_probability")
+        if value is None:
+            return 0.0
+        return cls._normalize_probability(value)
 
     def _attach_process_equipment_codes(self, rows: list[dict[str, Any]]) -> None:
         if not rows:

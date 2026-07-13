@@ -119,12 +119,13 @@ class ProcessAnalysisSearchRepository:
             "currentProcessCode": event.get("currentProcessCode"),
             "sourceProcessCode": event.get("sourceProcessCode"),
             "sourceEquipmentCode": event.get("sourceEquipmentCode"),
+            "targetEquipmentCode": event.get("targetEquipmentCode"),
             "predictedDefectProcess": event.get("predictedDefectProcess"),
             "currentDefectProbability": self._safe_float(event.get("currentDefectProbability")),
             "transferProbability": self._safe_float(event.get("transferProbability")),
             "defectThreshold": self._safe_float(event.get("defectThreshold")),
             "transferThreshold": self._safe_float(event.get("transferThreshold")),
-            "defectProbability": self._safe_int(event.get("defectProbability")),
+            "defectProbability": self._safe_float(event.get("defectProbability")),
             "expectedTime": event.get("expectedTime"),
             "expectedStepsAfter": self._safe_int(event.get("expectedStepsAfter")),
             "riskLevel": event.get("riskLevel"),
@@ -144,6 +145,51 @@ class ProcessAnalysisSearchRepository:
                 },
             ],
         )
+
+    def delete_bottleneck_documents_by_date(self, analysis_date: DateType) -> int:
+        if not self.enabled:
+            return 0
+        response = self.client.delete_by_query(
+            index=settings.elasticsearch_bottleneck_index,
+            body={"query": self._date_range_query("detectedAt", analysis_date)},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return self._safe_int(response.get("deleted")) or 0
+
+    def delete_defect_transfer_documents_by_date(self, analysis_date: DateType) -> int:
+        if not self.enabled:
+            return 0
+        response = self.client.delete_by_query(
+            index=settings.elasticsearch_defect_transfer_index,
+            body={"query": self._date_range_query("predictedAt", analysis_date)},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return self._safe_int(response.get("deleted")) or 0
+
+    def delete_defect_transfer_documents_by_vehicle_and_date(
+        self,
+        *,
+        vehicle_id: str | None,
+        analysis_date: DateType,
+    ) -> int:
+        if not self.enabled:
+            return 0
+        query: dict[str, Any] = {
+            "bool": {
+                "filter": [self._date_range_query("predictedAt", analysis_date)],
+            },
+        }
+        if vehicle_id:
+            query["bool"]["must"] = [{"term": {"vehicleId": vehicle_id}}]
+        response = self.client.delete_by_query(
+            index=settings.elasticsearch_defect_transfer_index,
+            body={"query": query},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return self._safe_int(response.get("deleted")) or 0
 
     def list_bottleneck_page(
         self,
@@ -252,7 +298,10 @@ class ProcessAnalysisSearchRepository:
     ) -> dict[str, Any] | None:
         query: dict[str, Any] = {
             "size": 1,
+            "collapse": {"field": "carMasterId"},
             "sort": [
+                {"transferProbability": {"order": "desc", "missing": "_last"}},
+                {"currentDefectProbability": {"order": "desc", "missing": "_last"}},
                 {"predictedAt": {"order": "desc"}},
                 {"syncId": {"order": "desc"}},
             ],
@@ -412,12 +461,13 @@ class ProcessAnalysisSearchRepository:
                         "currentProcessCode": {"type": "keyword"},
                         "sourceProcessCode": {"type": "keyword"},
                         "sourceEquipmentCode": {"type": "keyword"},
+                        "targetEquipmentCode": {"type": "keyword"},
                         "predictedDefectProcess": {"type": "keyword"},
                         "currentDefectProbability": {"type": "double"},
                         "transferProbability": {"type": "double"},
                         "defectThreshold": {"type": "double"},
                         "transferThreshold": {"type": "double"},
-                        "defectProbability": {"type": "integer"},
+                        "defectProbability": {"type": "double"},
                         "expectedTime": {"type": "keyword"},
                         "expectedStepsAfter": {"type": "integer"},
                         "riskLevel": {"type": "keyword"},
@@ -522,11 +572,17 @@ class ProcessAnalysisSearchRepository:
 
     @staticmethod
     def _map_defect_source(source: dict[str, Any]) -> dict[str, Any]:
-        current_defect_probability = source.get("currentDefectProbability")
-        transfer_probability = source.get("transferProbability")
-        defect_probability = source.get("defectProbability")
+        current_defect_probability = ProcessAnalysisSearchRepository._normalize_probability(
+            source.get("currentDefectProbability"),
+        )
+        transfer_probability = ProcessAnalysisSearchRepository._normalize_probability(
+            source.get("transferProbability"),
+        )
+        defect_probability = ProcessAnalysisSearchRepository._normalize_probability(
+            source.get("defectProbability"),
+        )
         if defect_probability is None and current_defect_probability is not None:
-            defect_probability = round(float(current_defect_probability) * 100)
+            defect_probability = current_defect_probability
         return {
             "analysis_type": source.get("analysisType"),
             "sync_id": source.get("syncId"),
@@ -537,6 +593,7 @@ class ProcessAnalysisSearchRepository:
             "current_process_code": source.get("currentProcessCode"),
             "source_process_code": source.get("sourceProcessCode") or source.get("currentProcessCode"),
             "source_equipment_code": source.get("sourceEquipmentCode"),
+            "target_equipment_code": source.get("targetEquipmentCode"),
             "predicted_defect_process": source.get("predictedDefectProcess"),
             "target_defect_probability": transfer_probability,
             "defect_probability": defect_probability,
@@ -561,3 +618,12 @@ class ProcessAnalysisSearchRepository:
                 else 0.0
             ),
         }
+
+    @staticmethod
+    def _normalize_probability(value: Any) -> float | None:
+        if value is None:
+            return None
+        normalized = float(value)
+        if abs(normalized) > 1.0:
+            normalized /= 100.0
+        return round(normalized, 4)
