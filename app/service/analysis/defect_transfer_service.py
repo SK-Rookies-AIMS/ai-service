@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
+from datetime import date as DateType
 from typing import Any
 
 from fastapi import status
@@ -9,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.dto.response import AnalysisDateOption
 from app.dto.response.defect_transfer_response import (
     DefectTransferCauseItem,
     DefectTransferCausePage,
@@ -20,10 +22,14 @@ from app.repository.defect_transfer_prediction_repository import (
 )
 from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.utils.json_utils import from_json, to_json
-from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
+from app.utils.process_label_utils import (
+    NEXT_PROCESS,
+    equipment_code_for_car_process,
+    format_process_with_line,
+)
 
 
-DEFECT_TRANSFER_CACHE_VERSION = "v8"
+DEFECT_TRANSFER_CACHE_VERSION = "v11"
 logger = logging.getLogger(__name__)
 
 
@@ -54,20 +60,17 @@ class DefectTransferAnalysisService:
         *,
         cursor: int | None,
         size: int,
+        date: DateType | None = None,
     ) -> DefectTransferPredictionPage:
         cache_key = self._prediction_cache_key(
             cursor=cursor,
             size=size,
+            date=date,
         )
-        cached_value = self._cache_get(cache_key)
-        if cached_value:
-            cached_page = DefectTransferPredictionPage.model_validate(from_json(cached_value))
-            if cached_page.content:
-                return cached_page
-
         page = self.get_predictions(
             cursor=cursor,
             size=size,
+            date=date,
         )
         self._cache_set(cache_key, page.model_dump(by_alias=False))
         return page
@@ -78,22 +81,19 @@ class DefectTransferAnalysisService:
         vehicle_id: str | None,
         cursor: int | None,
         size: int,
+        date: DateType | None = None,
     ) -> DefectTransferCausePage:
         cache_key = self._cause_cache_key(
             vehicle_id=vehicle_id,
             cursor=cursor,
             size=size,
+            date=date,
         )
-        cached_value = self._cache_get(cache_key)
-        if cached_value:
-            cached_page = DefectTransferCausePage.model_validate(from_json(cached_value))
-            if cached_page.content:
-                return cached_page
-
         page = self.get_cause_analysis(
             vehicle_id=vehicle_id,
             cursor=cursor,
             size=size,
+            date=date,
         )
         self._cache_set(cache_key, page.model_dump(by_alias=False))
         return page
@@ -119,9 +119,17 @@ class DefectTransferAnalysisService:
         *,
         cursor: int | None,
         size: int,
+        date: DateType | None = None,
     ) -> DefectTransferPredictionPage:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
+        cache_key = self._prediction_cache_key(
+            cursor=cursor,
+            size=size,
+            date=date,
+        )
+        date_options = self._safe_get_date_options()
+        selected_date = self._resolve_date(date, date_options)
         rows: list[dict[str, Any]]
         has_next = False
         if self.search_repository is not None:
@@ -129,27 +137,42 @@ class DefectTransferAnalysisService:
                 rows, has_next = self.search_repository.list_defect_prediction_page(
                     cursor=page,
                     size=safe_size,
+                    analysis_date=selected_date,
                 )
             except Exception:
                 logger.exception("Elasticsearch defect prediction query failed. Falling back to DB.")
+                cached_value = self._cache_get(cache_key)
+                if cached_value:
+                    cached_page = DefectTransferPredictionPage.model_validate(from_json(cached_value))
+                    if cached_page.content:
+                        return cached_page
                 try:
                     rows, has_next = self.repository.list_prediction_page(
                         cursor=page,
                         size=safe_size,
+                        analysis_date=selected_date,
                     )
                 except SQLAlchemyError as exc:
                     raise self._db_exception() from exc
         else:
+            cached_value = self._cache_get(cache_key)
+            if cached_value:
+                cached_page = DefectTransferPredictionPage.model_validate(from_json(cached_value))
+                if cached_page.content:
+                    return cached_page
             try:
                 rows, has_next = self.repository.list_prediction_page(
                     cursor=page,
                     size=safe_size,
+                    analysis_date=selected_date,
                 )
             except SQLAlchemyError as exc:
                 raise self._db_exception() from exc
 
         return DefectTransferPredictionPage(
             content=[self._to_prediction_item(row) for row in rows],
+            date=selected_date,
+            dateOptions=date_options,
             hasNext=has_next,
             nextCursor=page + 1 if has_next else None,
         )
@@ -188,34 +211,60 @@ class DefectTransferAnalysisService:
         vehicle_id: str | None,
         cursor: int | None,
         size: int,
+        date: DateType | None = None,
     ) -> DefectTransferCausePage:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
+        cache_key = self._cause_cache_key(
+            vehicle_id=vehicle_id,
+            cursor=cursor,
+            size=size,
+            date=date,
+        )
+        date_options = self._safe_get_date_options(vehicle_id=vehicle_id)
+        selected_date = self._resolve_date(date, date_options)
         selected: dict[str, Any] | None
-        rows: list[dict[str, Any]]
-        has_next = False
         if self.search_repository is not None:
             try:
                 selected = self.search_repository.get_latest_defect_cause_document(
                     vehicle_id=vehicle_id,
+                    analysis_date=selected_date,
                 )
-                rows = [selected] if selected is not None else []
-            except Exception:
-                logger.exception("Elasticsearch defect cause query failed. Falling back to DB.")
-                try:
-                    selected, rows, has_next = self.repository.list_cause_page(
+                if selected is None:
+                    selected, _rows, _has_next = self.repository.list_cause_page(
                         vehicle_id=vehicle_id,
                         cursor=page,
                         size=safe_size,
+                        analysis_date=selected_date,
+                    )
+            except Exception:
+                logger.exception("Elasticsearch defect cause query failed. Falling back to DB.")
+                cached_value = self._cache_get(cache_key)
+                if cached_value:
+                    cached_page = DefectTransferCausePage.model_validate(from_json(cached_value))
+                    if cached_page.content:
+                        return cached_page
+                try:
+                    selected, _rows, _has_next = self.repository.list_cause_page(
+                        vehicle_id=vehicle_id,
+                        cursor=page,
+                        size=safe_size,
+                        analysis_date=selected_date,
                     )
                 except SQLAlchemyError as exc:
                     raise self._db_exception() from exc
         else:
+            cached_value = self._cache_get(cache_key)
+            if cached_value:
+                cached_page = DefectTransferCausePage.model_validate(from_json(cached_value))
+                if cached_page.content:
+                    return cached_page
             try:
-                selected, rows, has_next = self.repository.list_cause_page(
+                selected, _rows, _has_next = self.repository.list_cause_page(
                     vehicle_id=vehicle_id,
                     cursor=page,
                     size=safe_size,
+                    analysis_date=selected_date,
                 )
             except SQLAlchemyError as exc:
                 raise self._db_exception() from exc
@@ -229,35 +278,36 @@ class DefectTransferAnalysisService:
                 currentProcess=None,
                 predictedDefectProcess=None,
                 transferProbability=None,
+                date=selected_date,
+                dateOptions=date_options,
                 content=[],
                 hasNext=False,
                 nextCursor=None,
             )
 
+        representative_cause, detail_causes = self._build_cause_sections(selected)
         offset = page * safe_size
-        paged_rows = rows[offset : offset + safe_size]
-        display_rows = [row for row in paged_rows if self._is_displayable_cause(row)]
-        if has_next is False:
-            has_next = len(rows) > offset + safe_size
+        display_detail_causes = detail_causes[offset : offset + safe_size]
+        has_next = len(detail_causes) > offset + safe_size
 
         return DefectTransferCausePage(
             vehicleId=str(selected.get("vehicle_id")),
             carMasterId=int(selected["car_master_id"]),
-            predictedDefectProbability=self._result_probability(selected),
+            predictedDefectProbability=self._normalize_probability(
+                selected.get("target_defect_probability"),
+            ),
             riskLevel=selected.get("risk_grade"),
             currentProcess=format_process_with_line(
                 selected.get("source_process_code"),
                 selected.get("source_equipment_code"),
             ),
             predictedDefectProcess=self._resolve_predicted_defect_process(selected),
-            transferProbability=self._percent(selected.get("target_defect_probability")),
-            content=[
-                self._to_cause_item(
-                    row,
-                    rank=index,
-                )
-                for index, row in enumerate(display_rows, page * safe_size + 1)
-            ],
+            transferProbability=self._normalize_probability(selected.get("target_defect_probability")),
+            date=selected_date,
+            dateOptions=date_options,
+            content=[representative_cause],
+            representativeCause=representative_cause,
+            detailCauses=display_detail_causes,
             hasNext=has_next,
             nextCursor=page + 1 if has_next else None,
         )
@@ -284,37 +334,45 @@ class DefectTransferAnalysisService:
         )
 
     @staticmethod
-    def _percent(value: Any) -> int:
+    def _normalize_probability(value: Any) -> float:
         if value is None:
-            return 0
-        return round(float(value) * 100)
+            return 0.0
+        normalized = float(value)
+        if abs(normalized) > 1.0:
+            normalized /= 100.0
+        return round(normalized, 4)
 
     @classmethod
-    def _result_probability(cls, row: dict[str, Any]) -> int:
-        value = row.get("target_defect_probability")
+    def _result_probability(cls, row: dict[str, Any]) -> float:
+        value = row.get("current_defect_probability")
         if value is None:
-            value = row.get("current_defect_probability")
-        return cls._percent(value)
+            value = row.get("defect_probability")
+        if value is None:
+            value = row.get("target_defect_probability")
+        return cls._normalize_probability(value)
 
     @classmethod
     def _resolve_predicted_defect_process(cls, row: dict[str, Any]) -> str | None:
         if cls._result_probability(row) <= 0:
             return None
 
-        db_val = row.get("predicted_defect_process")
-        if db_val:
-            return db_val
-
         source_code = str(row.get("source_process_code") or "").strip().upper()
-        if row.get("target_defect_probability") is not None:
-            process_code = row.get("target_process_code") or NEXT_PROCESS.get(source_code)
-            equipment_code = row.get("target_equipment_code")
-        else:
-            process_code = row.get("source_process_code")
-            equipment_code = row.get("source_equipment_code")
-
+        process_code = row.get("target_process_code") or NEXT_PROCESS.get(source_code)
         if not process_code:
             return None
+        process_code = str(process_code).strip().upper()
+        if process_code == source_code:
+            equipment_code = row.get("source_equipment_code")
+        else:
+            equipment_code = row.get("target_equipment_code") or equipment_code_for_car_process(
+                car_master_id=int(row["car_master_id"]),
+                process_code=process_code,
+            )
+
+        db_val = row.get("predicted_defect_process")
+        if db_val and "(" in str(db_val) and ")" in str(db_val):
+            return str(db_val)
+
         return format_process_with_line(process_code, equipment_code)
 
     @staticmethod
@@ -359,40 +417,103 @@ class DefectTransferAnalysisService:
         return ""
 
     @classmethod
+    def _build_cause_sections(
+        cls,
+        row: dict[str, Any],
+    ) -> tuple[DefectTransferCauseItem, list[DefectTransferCauseItem]]:
+        main_causes = cls._normalize_main_causes(row.get("main_causes") or row.get("causes"))
+        if main_causes:
+            representative_cause = cls._to_cause_item(
+                {
+                    "rank": main_causes[0].get("rank") or 1,
+                    "feature": main_causes[0].get("feature") or "main_causes",
+                    "label": main_causes[0].get("label") or main_causes[0].get("message") or "",
+                    "value": main_causes[0].get("value") or "",
+                    "impact": main_causes[0].get("impact") or 0.0,
+                    "message": main_causes[0].get("message") or main_causes[0].get("label") or "",
+                },
+                rank=1,
+            )
+            detail_causes = [
+                cls._to_cause_item(
+                    {
+                        "rank": cause.get("rank") or index,
+                        "feature": cause.get("feature") or "main_causes",
+                        "label": cause.get("label") or cause.get("message") or "",
+                        "value": cause.get("value") or "",
+                        "impact": cause.get("impact") or 0.0,
+                        "message": cause.get("message") or cause.get("label") or "",
+                    },
+                    rank=index,
+                )
+                for index, cause in enumerate(main_causes[1:], start=2)
+            ]
+            return representative_cause, detail_causes
+
+        summary_message = cls._primary_cause_message(row)
+        if not summary_message:
+            summary_message = "no main cause available"
+        representative_cause = cls._to_cause_item(
+            {
+                "rank": 1,
+                "feature": "main_causes",
+                "label": summary_message,
+                "value": "",
+                "impact": float(row.get("influence_score") or 0.0),
+                "message": summary_message,
+            },
+            rank=1,
+        )
+        return representative_cause, []
+
+    @staticmethod
+    def _normalize_main_causes(causes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for cause in causes[:5]:
+            message = str(cause.get("message") or cause.get("label") or "").strip()
+            if not message:
+                continue
+            try:
+                impact = float(cause.get("impact") or 0.0)
+            except (TypeError, ValueError):
+                impact = 0.0
+            normalized.append(
+                {
+                    "message": message,
+                    "impact": impact,
+                },
+            )
+
+        if normalized:
+            return normalized
+
+        return [
+            {
+                "message": "no main cause available",
+                "impact": 0.0,
+            },
+        ]
+
+    @classmethod
     def _to_cause_item(
         cls,
         row: dict[str, Any],
         *,
         rank: int,
     ) -> DefectTransferCauseItem:
-        main_causes = row.get("main_causes")
-        normalized_main_causes: list[dict[str, Any]] = []
-        if isinstance(main_causes, list):
-            for cause in main_causes:
-                if not isinstance(cause, dict):
-                    continue
-                message = str(cause.get("message") or cause.get("label") or "").strip()
-                if not message:
-                    continue
-                try:
-                    impact = float(cause.get("impact") or 0.0)
-                except (TypeError, ValueError):
-                    impact = 0.0
-                normalized_main_causes.append(
-                    {
-                        "message": message,
-                        "impact": impact,
-                    },
-                )
+        message = str(row.get("message") or row.get("label") or "").strip()
+        if not message:
+            message = cls._primary_cause_message(row)
+        if not message:
+            message = "no main cause available"
 
         return DefectTransferCauseItem(
-            rank=rank,
-            feature="main_causes",
-            label=cls._primary_cause_message(row),
-            value="",
-            impact=float(row.get("influence_score") or 0.0),
-            message=cls._primary_cause_message(row),
-            main_causes=normalized_main_causes,
+            rank=int(row.get("rank") or rank),
+            feature=str(row.get("feature") or "main_causes"),
+            label=str(row.get("label") or message),
+            value=str(row.get("value") or ""),
+            impact=float(row.get("impact") or 0.0),
+            message=message,
         )
 
     @staticmethod
@@ -426,12 +547,10 @@ class DefectTransferAnalysisService:
             return None
         try:
             return self._redis().get(cache_key)
-        except Exception as exc:
+        except Exception:
             self._redis_client = None
-            raise AppException(
-                "Defect transfer Redis cache lookup failed.",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            ) from exc
+            logger.exception("Defect transfer Redis cache lookup failed.")
+            return None
 
     def _cache_set(self, cache_key: str, data: dict[str, Any]) -> None:
         if not settings.redis_url:
@@ -442,12 +561,9 @@ class DefectTransferAnalysisService:
                 settings.redis_cache_ttl_seconds,
                 to_json(data),
             )
-        except Exception as exc:
+        except Exception:
             self._redis_client = None
-            raise AppException(
-                "Defect transfer Redis cache write failed.",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            ) from exc
+            logger.exception("Defect transfer Redis cache write failed.")
 
     def _redis(self) -> Any:
         if self._redis_client is None:
@@ -472,12 +588,13 @@ class DefectTransferAnalysisService:
         *,
         cursor: int | None,
         size: int,
+        date: DateType | None,
     ) -> str:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
         return (
             f"{settings.redis_key_prefix}:process:defect-transfer:"
-            f"predictions:{DEFECT_TRANSFER_CACHE_VERSION}:{page}:{safe_size}"
+            f"predictions:{DEFECT_TRANSFER_CACHE_VERSION}:{self._safe_cache_part(date.isoformat() if date else None)}:{page}:{safe_size}"
         )
 
     def _cause_cache_key(
@@ -486,13 +603,53 @@ class DefectTransferAnalysisService:
         vehicle_id: str | None,
         cursor: int | None,
         size: int,
+        date: DateType | None,
     ) -> str:
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
         return (
             f"{settings.redis_key_prefix}:process:defect-transfer:"
-            f"causes:{DEFECT_TRANSFER_CACHE_VERSION}:{self._safe_cache_part(vehicle_id)}:{page}:{safe_size}"
+            f"causes:{DEFECT_TRANSFER_CACHE_VERSION}:{self._safe_cache_part(vehicle_id)}:{self._safe_cache_part(date.isoformat() if date else None)}:{page}:{safe_size}"
         )
+
+    def _get_date_options(
+        self,
+        *,
+        vehicle_id: str | None = None,
+    ) -> list[AnalysisDateOption]:
+        options = self.repository.list_date_options(vehicle_id=vehicle_id)
+        return [
+            AnalysisDateOption.model_validate(
+                {
+                    "date": row["date"],
+                    "sampleEventId": row.get("sample_event_id"),
+                },
+            )
+            for row in options
+            if row.get("date") is not None
+        ]
+
+    def _safe_get_date_options(
+        self,
+        *,
+        vehicle_id: str | None = None,
+    ) -> list[AnalysisDateOption]:
+        try:
+            return self._get_date_options(vehicle_id=vehicle_id)
+        except Exception:
+            logger.exception("Failed to load defect transfer date options.")
+            return []
+
+    @staticmethod
+    def _resolve_date(
+        requested_date: DateType | None,
+        date_options: list[AnalysisDateOption],
+    ) -> DateType | None:
+        if requested_date is not None:
+            return requested_date
+        if date_options:
+            return date_options[0].date
+        return None
 
 
 @lru_cache(maxsize=1)

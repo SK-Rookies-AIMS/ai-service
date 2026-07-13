@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date as DateType
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -118,12 +119,13 @@ class ProcessAnalysisSearchRepository:
             "currentProcessCode": event.get("currentProcessCode"),
             "sourceProcessCode": event.get("sourceProcessCode"),
             "sourceEquipmentCode": event.get("sourceEquipmentCode"),
+            "targetEquipmentCode": event.get("targetEquipmentCode"),
             "predictedDefectProcess": event.get("predictedDefectProcess"),
             "currentDefectProbability": self._safe_float(event.get("currentDefectProbability")),
             "transferProbability": self._safe_float(event.get("transferProbability")),
             "defectThreshold": self._safe_float(event.get("defectThreshold")),
             "transferThreshold": self._safe_float(event.get("transferThreshold")),
-            "defectProbability": self._safe_int(event.get("defectProbability")),
+            "defectProbability": self._safe_float(event.get("defectProbability")),
             "expectedTime": event.get("expectedTime"),
             "expectedStepsAfter": self._safe_int(event.get("expectedStepsAfter")),
             "riskLevel": event.get("riskLevel"),
@@ -144,13 +146,61 @@ class ProcessAnalysisSearchRepository:
             ],
         )
 
+    def delete_bottleneck_documents_by_date(self, analysis_date: DateType) -> int:
+        if not self.enabled:
+            return 0
+        response = self.client.delete_by_query(
+            index=settings.elasticsearch_bottleneck_index,
+            body={"query": self._date_range_query("detectedAt", analysis_date)},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return self._safe_int(response.get("deleted")) or 0
+
+    def delete_defect_transfer_documents_by_date(self, analysis_date: DateType) -> int:
+        if not self.enabled:
+            return 0
+        response = self.client.delete_by_query(
+            index=settings.elasticsearch_defect_transfer_index,
+            body={"query": self._date_range_query("predictedAt", analysis_date)},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return self._safe_int(response.get("deleted")) or 0
+
+    def delete_defect_transfer_documents_by_vehicle_and_date(
+        self,
+        *,
+        vehicle_id: str | None,
+        analysis_date: DateType,
+    ) -> int:
+        if not self.enabled:
+            return 0
+        query: dict[str, Any] = {
+            "bool": {
+                "filter": [self._date_range_query("predictedAt", analysis_date)],
+            },
+        }
+        if vehicle_id:
+            query["bool"]["must"] = [{"term": {"vehicleId": vehicle_id}}]
+        response = self.client.delete_by_query(
+            index=settings.elasticsearch_defect_transfer_index,
+            body={"query": query},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return self._safe_int(response.get("deleted")) or 0
+
     def list_bottleneck_page(
         self,
         *,
         cursor: int,
         size: int,
+        analysis_date: DateType | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        latest_snapshot_id = self._latest_bottleneck_snapshot_id()
+        latest_snapshot_id = self._latest_bottleneck_snapshot_id(
+            analysis_date=analysis_date,
+        )
         if not latest_snapshot_id:
             return [], False
 
@@ -210,6 +260,7 @@ class ProcessAnalysisSearchRepository:
         *,
         cursor: int,
         size: int,
+        analysis_date: DateType | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         page = max(cursor, 0)
         safe_size = max(1, min(size, 100))
@@ -226,6 +277,8 @@ class ProcessAnalysisSearchRepository:
             "size": safe_size + 1,
             "track_total_hits": True,
         }
+        if analysis_date is not None:
+            query["query"] = self._date_range_query("predictedAt", analysis_date)
         response = self.client.search(
             index=settings.elasticsearch_defect_transfer_index,
             body=query,
@@ -241,10 +294,14 @@ class ProcessAnalysisSearchRepository:
         self,
         *,
         vehicle_id: str | None,
+        analysis_date: DateType | None = None,
     ) -> dict[str, Any] | None:
         query: dict[str, Any] = {
             "size": 1,
+            "collapse": {"field": "carMasterId"},
             "sort": [
+                {"transferProbability": {"order": "desc", "missing": "_last"}},
+                {"currentDefectProbability": {"order": "desc", "missing": "_last"}},
                 {"predictedAt": {"order": "desc"}},
                 {"syncId": {"order": "desc"}},
             ],
@@ -253,6 +310,13 @@ class ProcessAnalysisSearchRepository:
             query["query"] = {"term": {"vehicleId": vehicle_id}}
         else:
             query["query"] = {"match_all": {}}
+        if analysis_date is not None:
+            query["query"] = {
+                "bool": {
+                    "must": [query["query"]],
+                    "filter": [self._date_range_query("predictedAt", analysis_date)],
+                },
+            }
 
         response = self.client.search(
             index=settings.elasticsearch_defect_transfer_index,
@@ -263,7 +327,11 @@ class ProcessAnalysisSearchRepository:
             return None
         return self._map_defect_source(hits[0].get("_source") or {})
 
-    def _latest_bottleneck_snapshot_id(self) -> str | None:
+    def _latest_bottleneck_snapshot_id(
+        self,
+        *,
+        analysis_date: DateType | None = None,
+    ) -> str | None:
         query = {
             "size": 1,
             "query": {"match_all": {}},
@@ -273,6 +341,8 @@ class ProcessAnalysisSearchRepository:
                 {"syncId": {"order": "desc"}},
             ],
         }
+        if analysis_date is not None:
+            query["query"] = self._date_range_query("detectedAt", analysis_date)
         response = self.client.search(
             index=settings.elasticsearch_bottleneck_index,
             body=query,
@@ -283,6 +353,18 @@ class ProcessAnalysisSearchRepository:
         source = hits[0].get("_source") or {}
         snapshot_id = source.get("snapshotId")
         return str(snapshot_id) if snapshot_id is not None else None
+
+    @staticmethod
+    def _date_range_query(field: str, analysis_date: DateType) -> dict[str, Any]:
+        next_date = analysis_date.fromordinal(analysis_date.toordinal() + 1)
+        return {
+            "range": {
+                field: {
+                    "gte": analysis_date.isoformat(),
+                    "lt": next_date.isoformat(),
+                },
+            },
+        }
 
     def _bulk_index(self, actions: list[dict[str, Any]]) -> None:
         if not actions:
@@ -379,12 +461,13 @@ class ProcessAnalysisSearchRepository:
                         "currentProcessCode": {"type": "keyword"},
                         "sourceProcessCode": {"type": "keyword"},
                         "sourceEquipmentCode": {"type": "keyword"},
+                        "targetEquipmentCode": {"type": "keyword"},
                         "predictedDefectProcess": {"type": "keyword"},
                         "currentDefectProbability": {"type": "double"},
                         "transferProbability": {"type": "double"},
                         "defectThreshold": {"type": "double"},
                         "transferThreshold": {"type": "double"},
-                        "defectProbability": {"type": "integer"},
+                        "defectProbability": {"type": "double"},
                         "expectedTime": {"type": "keyword"},
                         "expectedStepsAfter": {"type": "integer"},
                         "riskLevel": {"type": "keyword"},
@@ -489,11 +572,17 @@ class ProcessAnalysisSearchRepository:
 
     @staticmethod
     def _map_defect_source(source: dict[str, Any]) -> dict[str, Any]:
-        current_defect_probability = source.get("currentDefectProbability")
-        transfer_probability = source.get("transferProbability")
-        defect_probability = source.get("defectProbability")
+        current_defect_probability = ProcessAnalysisSearchRepository._normalize_probability(
+            source.get("currentDefectProbability"),
+        )
+        transfer_probability = ProcessAnalysisSearchRepository._normalize_probability(
+            source.get("transferProbability"),
+        )
+        defect_probability = ProcessAnalysisSearchRepository._normalize_probability(
+            source.get("defectProbability"),
+        )
         if defect_probability is None and current_defect_probability is not None:
-            defect_probability = round(float(current_defect_probability) * 100)
+            defect_probability = current_defect_probability
         return {
             "analysis_type": source.get("analysisType"),
             "sync_id": source.get("syncId"),
@@ -504,6 +593,7 @@ class ProcessAnalysisSearchRepository:
             "current_process_code": source.get("currentProcessCode"),
             "source_process_code": source.get("sourceProcessCode") or source.get("currentProcessCode"),
             "source_equipment_code": source.get("sourceEquipmentCode"),
+            "target_equipment_code": source.get("targetEquipmentCode"),
             "predicted_defect_process": source.get("predictedDefectProcess"),
             "target_defect_probability": transfer_probability,
             "defect_probability": defect_probability,
@@ -528,3 +618,12 @@ class ProcessAnalysisSearchRepository:
                 else 0.0
             ),
         }
+
+    @staticmethod
+    def _normalize_probability(value: Any) -> float | None:
+        if value is None:
+            return None
+        normalized = float(value)
+        if abs(normalized) > 1.0:
+            normalized /= 100.0
+        return round(normalized, 4)

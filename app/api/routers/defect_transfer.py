@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
+from datetime import date as DateType
 
 from app.dto.response import CommonResponse
 from app.dto.response.defect_transfer_response import (
@@ -29,6 +30,10 @@ DefectTransferDiagnosticsResponse = CommonResponse[dict[str, Any]]
     summary="불량 전이 목록 조회",
 )
 def get_defect_transfer_predictions(
+    date: DateType | None = Query(
+        default=None,
+        description="조회할 날짜입니다. 미지정 시 최신 가능한 날짜를 사용합니다.",
+    ),
     cursor: int | None = Query(default=None, ge=0, examples=[0]),
     size: int = Query(default=5, ge=1, le=100, examples=[5]),
     service: DefectTransferAnalysisService = Depends(get_defect_transfer_analysis_service),
@@ -37,6 +42,7 @@ def get_defect_transfer_predictions(
         data=service.get_cached_predictions(
             cursor=cursor,
             size=size,
+            date=date,
         ),
         message="불량 전이 목록 조회가 완료되었습니다.",
     )
@@ -67,6 +73,10 @@ def get_defect_transfer_causes(
         alias="vehicleId",
         description="car_master.vehicle_id. If omitted, the latest vehicle is used.",
     ),
+    date: DateType | None = Query(
+        default=None,
+        description="조회할 날짜입니다. 미지정 시 최신 가능한 날짜를 사용합니다.",
+    ),
     cursor: int | None = Query(default=None, ge=0, examples=[0]),
     size: int = Query(default=5, ge=1, le=100, examples=[5]),
     service: DefectTransferAnalysisService = Depends(get_defect_transfer_analysis_service),
@@ -76,6 +86,7 @@ def get_defect_transfer_causes(
             vehicle_id=vehicle_id,
             cursor=cursor,
             size=size,
+            date=date,
         ),
         message="SHAP 기반 AI 원인 분석 조회가 완료되었습니다.",
     )

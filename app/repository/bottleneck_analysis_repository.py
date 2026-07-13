@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from datetime import date as DateType
 from datetime import datetime
 from typing import Any
 
@@ -68,8 +69,9 @@ class BottleneckAnalysisRepository:
         *,
         cursor: int,
         size: int,
+        analysis_date: DateType | None = None,
     ) -> list[dict[str, Any]]:
-        snapshot_detected_at = self._latest_snapshot_detected_at()
+        snapshot_detected_at = self._latest_snapshot_detected_at(analysis_date)
         if snapshot_detected_at is None:
             return []
 
@@ -104,8 +106,10 @@ class BottleneckAnalysisRepository:
 
     def count_results(
         self,
+        *,
+        analysis_date: DateType | None = None,
     ) -> int:
-        snapshot_detected_at = self._latest_snapshot_detected_at()
+        snapshot_detected_at = self._latest_snapshot_detected_at(analysis_date)
         if snapshot_detected_at is None:
             return 0
 
@@ -124,7 +128,20 @@ class BottleneckAnalysisRepository:
 
         return len(self.list_results(cursor=0, size=raw_count))
 
-    def list_manufacturing_event_histories(self) -> list[dict[str, Any]]:
+    def delete_results_by_date(self, analysis_date: DateType) -> int:
+        from sqlalchemy import func
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                self.table.delete().where(func.date(self.table.c.detected_at) == analysis_date),
+            )
+        return int(result.rowcount or 0)
+
+    def list_manufacturing_event_histories(
+        self,
+        *,
+        analysis_date: DateType | None = None,
+    ) -> list[dict[str, Any]]:
         from sqlalchemy import select, func
 
         query = (
@@ -138,7 +155,10 @@ class BottleneckAnalysisRepository:
             )
             .where(manufacturing_event_json.c.dispatch_status == "SENT")
             .where(manufacturing_event_json.c.is_sent.is_(True))
-            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+            .where(
+                func.date(manufacturing_event_json.c.event_time)
+                == (analysis_date or func.current_date())
+            )
             .order_by(manufacturing_event_json.c.id.asc())
         )
         with self.event_engine.connect() as conn:
@@ -148,7 +168,11 @@ class BottleneckAnalysisRepository:
                 for row in rows
             ]
 
-    def list_pending_manufacturing_event_histories(self) -> list[dict[str, Any]]:
+    def list_pending_manufacturing_event_histories(
+        self,
+        *,
+        analysis_date: DateType | None = None,
+    ) -> list[dict[str, Any]]:
         from sqlalchemy import select, func
 
         query = (
@@ -163,7 +187,10 @@ class BottleneckAnalysisRepository:
             .where(manufacturing_event_json.c.dispatch_status == "SENT")
             .where(manufacturing_event_json.c.is_sent.is_(True))
             .where(manufacturing_event_json.c.bottleneck_analysis_done.is_(False))
-            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+            .where(
+                func.date(manufacturing_event_json.c.event_time)
+                == (analysis_date or func.current_date())
+            )
             .order_by(manufacturing_event_json.c.id.asc())
         )
         with self.event_engine.connect() as conn:
@@ -172,6 +199,52 @@ class BottleneckAnalysisRepository:
                 self._to_bottleneck_history(row)
                 for row in rows
             ]
+
+    def list_date_options(self) -> list[dict[str, Any]]:
+        from sqlalchemy import func, select
+
+        query = (
+            select(
+                func.date(self.table.c.detected_at).label("date"),
+                func.min(self.table.c.manufacturing_event_id).label(
+                    "sample_manufacturing_event_id",
+                ),
+            )
+            .where(self.table.c.detected_at.is_not(None))
+            .group_by(func.date(self.table.c.detected_at))
+            .order_by(func.date(self.table.c.detected_at).desc())
+        )
+        with self.engine.connect() as conn:
+            date_rows = [dict(row) for row in conn.execute(query).mappings()]
+
+        sample_event_ids = sorted(
+            {
+                int(row["sample_manufacturing_event_id"])
+                for row in date_rows
+                if row.get("sample_manufacturing_event_id") is not None
+            },
+        )
+        event_id_by_id: dict[int, str] = {}
+        if sample_event_ids:
+            event_query = select(
+                manufacturing_event_json.c.id,
+                manufacturing_event_json.c.event_id,
+            ).where(manufacturing_event_json.c.id.in_(sample_event_ids))
+            with self.event_engine.connect() as conn:
+                for event_row in conn.execute(event_query).mappings():
+                    event_id_by_id[int(event_row["id"])] = str(event_row["event_id"])
+
+        return [
+            {
+                "date": row["date"],
+                "sample_event_id": (
+                    event_id_by_id.get(int(row["sample_manufacturing_event_id"]))
+                    if row.get("sample_manufacturing_event_id") is not None
+                    else None
+                ),
+            }
+            for row in date_rows
+        ]
 
     def _event_ids_for_today(self) -> list[int]:
         from sqlalchemy import func, select
@@ -185,13 +258,15 @@ class BottleneckAnalysisRepository:
         with self.event_engine.connect() as conn:
             return [int(row[0]) for row in conn.execute(query).all()]
 
-    def _latest_snapshot_detected_at(self) -> datetime | None:
+    def _latest_snapshot_detected_at(
+        self,
+        analysis_date: DateType | None = None,
+    ) -> datetime | None:
         from sqlalchemy import func, select
 
-        query = (
-            select(func.max(self.table.c.detected_at))
-            .where(func.date(self.table.c.detected_at) == func.current_date())
-        )
+        query = select(func.max(self.table.c.detected_at))
+        if analysis_date is not None:
+            query = query.where(func.date(self.table.c.detected_at) == analysis_date)
         with self.engine.connect() as conn:
             value = conn.execute(query).scalar_one()
         return value
@@ -209,6 +284,24 @@ class BottleneckAnalysisRepository:
                 .where(manufacturing_event_json.c.id.in_(event_ids))
                 .values(
                     bottleneck_analysis_done=True,
+                    updated_at=func.current_timestamp(),
+                ),
+            )
+        return int(result.rowcount or 0)
+
+    def reset_bottleneck_analysis_done(self, event_ids: Iterable[int]) -> int:
+        event_ids = [int(event_id) for event_id in event_ids]
+        if not event_ids:
+            return 0
+
+        from sqlalchemy import func
+
+        with self.event_engine.begin() as conn:
+            result = conn.execute(
+                manufacturing_event_json.update()
+                .where(manufacturing_event_json.c.id.in_(event_ids))
+                .values(
+                    bottleneck_analysis_done=False,
                     updated_at=func.current_timestamp(),
                 ),
             )

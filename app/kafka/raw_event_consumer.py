@@ -325,12 +325,12 @@ def _broadcast_process_analysis_updates(
             **base_message,
             "type": "DEFECT_TRANSFER_UPDATED",
             "defectProbability": (
-                round(defect_prediction.defect_probability * 100.0, 1)
+                round(defect_prediction.defect_probability, 4)
                 if defect_prediction is not None
                 else None
             ),
             "transferProbability": (
-                round(defect_prediction.transfer_probability * 100.0, 1)
+                round(defect_prediction.transfer_probability, 4)
                 if defect_prediction is not None
                 and defect_prediction.transfer_probability is not None
                 else None
@@ -712,7 +712,7 @@ def _build_bottleneck_sync_event(
     summaries: list[dict[str, Any]],
 ) -> dict[str, Any]:
     sync_id = f"SNAP-{uuid4()}"
-    detected_at = seoul_now_iso()
+    detected_at = _iso_or_none(row.get("event_time")) or seoul_now_iso()
     first_summary = summaries[0] if summaries else {}
     return {
         "syncId": sync_id,
@@ -756,7 +756,7 @@ def _build_defect_transfer_sync_event(
     prediction: DefectTransferPrediction,
 ) -> dict[str, Any]:
     sync_id = f"SYNC-{uuid4()}"
-    predicted_at = seoul_now_iso()
+    predicted_at = _iso_or_none(row.get("event_time")) or seoul_now_iso()
     vehicle_id = _vehicle_id_for_car_master_id(repository, int(row["car_master_id"]))
     source_equipment_code = _source_equipment_code(row)
     current_process = _format_current_process(row, source_equipment_code)
@@ -764,6 +764,7 @@ def _build_defect_transfer_sync_event(
         prediction.predicted_process_code,
         row,
     )
+    target_equipment_code = _target_equipment_code(prediction.predicted_process_code, row)
     causes = [
         {
             "rank": cause.rank,
@@ -785,8 +786,9 @@ def _build_defect_transfer_sync_event(
         "currentProcessCode": prediction.current_process_code,
         "currentProcess": current_process,
         "sourceEquipmentCode": source_equipment_code,
+        "targetEquipmentCode": target_equipment_code,
         "predictedDefectProcess": predicted_process,
-        "defectProbability": round(prediction.defect_probability * 100.0),
+        "defectProbability": round(prediction.defect_probability, 4),
         "currentDefectProbability": prediction.defect_probability,
         "transferProbability": prediction.transfer_probability,
         "defectThreshold": prediction.defect_threshold,
@@ -1074,6 +1076,24 @@ def _format_predicted_defect_process(
             process_code=normalized,
         )
     return format_process_with_line(normalized, equipment_code)
+
+
+def _target_equipment_code(
+    process_code: str | None,
+    row: dict[str, Any],
+) -> str | None:
+    if process_code is None:
+        return None
+    from app.utils.process_label_utils import equipment_code_for_car_process
+
+    normalized = str(process_code).strip().upper()
+    source_code = str(row.get("process_code") or "").strip().upper()
+    if normalized == source_code:
+        return _source_equipment_code(row)
+    return equipment_code_for_car_process(
+        car_master_id=int(row["car_master_id"]),
+        process_code=normalized,
+    )
 
 
 def _format_current_process(

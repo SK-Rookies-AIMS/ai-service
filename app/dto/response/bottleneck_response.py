@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date as DateType
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.dto.response.analysis_common import AnalysisDateOption
 
 class BottleneckAnalysisItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -20,6 +22,8 @@ class BottleneckAnalysisPage(BaseModel):
 
     most_bottleneck_process: str | None = Field(alias="mostBottleneckProcess")
     most_bottleneck_risk_level: str | None = Field(alias="mostBottleneckRiskLevel")
+    date: DateType | None = None
+    date_options: list[AnalysisDateOption] = Field(default_factory=list, alias="dateOptions")
     content: list[BottleneckAnalysisItem]
     has_next: bool = Field(alias="hasNext")
     next_cursor: int | None = Field(alias="nextCursor")

@@ -62,6 +62,7 @@ def backfill_defect_transfer_predictions(*, limit: int | None = None) -> dict[st
     failed = 0
     for row in rows:
         try:
+            predicted_at = row.get("event_time")
             prediction = detector.predict_event(
                 _event_json(row["event_json"]),
                 str(row["process_code"]),
@@ -95,7 +96,7 @@ def backfill_defect_transfer_predictions(*, limit: int | None = None) -> dict[st
                     }
                     for cause in prediction.causes
                 ],
-                predicted_at=datetime.now(),
+                predicted_at=predicted_at if isinstance(predicted_at, datetime) else datetime.now(),
             )
             processed += 1
         except Exception:
