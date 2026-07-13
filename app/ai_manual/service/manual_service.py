@@ -1,10 +1,9 @@
-import os
-from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 from app.ai_manual.prompt.prompt_template import manual_prompt
 from app.ai_manual.rag.vector_store import VectorStore
 from app.ai_manual.repository.alert_event_repository import AlertEventRepository
+from app.core.config import settings
 
 from app.ai_manual.schema.request import (
     CriticalEvent,
@@ -22,16 +21,20 @@ class ManualService:
 
     def __init__(self):
 
-        load_dotenv()
-
         self.repository = AlertEventRepository()
         self.vector_store = VectorStore()
 
+        if not settings.openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is not configured"
+            )
+
         self.llm = ChatOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
+            api_key=settings.openai_api_key,
             model="gpt-5-mini",
             temperature=0.2
         ).with_structured_output(ManualResponse)
+
 
     # ======================================================
     # MAIN ENTRY
