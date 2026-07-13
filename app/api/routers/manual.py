@@ -2,7 +2,7 @@
 from app.ai_manual.service.manual_service import ManualService
 from fastapi import APIRouter, HTTPException, Header, Request
 from jose import jwt
-import os
+from app.core.config import settings
 
 router = APIRouter(
     prefix="/api/ai/manual",
@@ -28,8 +28,8 @@ def generate_manual(request: Request):
 
     payload = jwt.decode(
         token,
-        os.getenv("JWT_SECRET_KEY"),
-        algorithms=["HS384"]
+        settings.jwt_secret_key,
+        algorithms=[settings.jwt_algorithm]
     )
 
     print(payload)

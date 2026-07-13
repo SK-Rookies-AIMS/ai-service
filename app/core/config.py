@@ -103,6 +103,16 @@ class Settings(BaseSettings):
         alias="KAFKA_ANALYSIS_PRODUCER_LINGER_MS",
     )
 
+    jwt_secret_key: str = Field(
+        ...,
+        alias="JWT_SECRET_KEY",
+    )
+
+    jwt_algorithm: str = Field(
+        default="HS384",
+        alias="JWT_ALGORITHM",
+    )
+
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     redis_key_prefix: str = Field(default="aims:ai-service", alias="REDIS_KEY_PREFIX")
     redis_cache_ttl_seconds: int = Field(default=60, alias="REDIS_CACHE_TTL_SECONDS")
