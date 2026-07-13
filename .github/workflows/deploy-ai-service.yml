@@ -56,14 +56,19 @@ jobs:
 
       - name: Ensure ECR repository exists
         run: |
-          aws ecr describe-repositories \
+          set -euo pipefail
+
+          if ! aws ecr describe-repositories \
             --repository-names "$ECR_REPOSITORY" \
-            --region "$AWS_REGION" >/dev/null 2>&1 \
-          || aws ecr create-repository \
-            --repository-name "$ECR_REPOSITORY" \
             --region "$AWS_REGION" \
-            --image-scanning-configuration scanOnPush=true \
-            --image-tag-mutability MUTABLE
+            > /dev/null 2>&1; then
+
+            aws ecr create-repository \
+              --repository-name "$ECR_REPOSITORY" \
+              --region "$AWS_REGION" \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+          fi
 
       - name: Build and push Docker image
         id: build-image
@@ -75,6 +80,8 @@ jobs:
           IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
           BRANCH_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_REF_NAME}"
 
+          echo "Building image: $IMAGE_URI"
+
           docker build \
             -t "$IMAGE_URI" \
             -t "$BRANCH_IMAGE_URI" \
@@ -84,12 +91,13 @@ jobs:
           docker push "$BRANCH_IMAGE_URI"
 
           echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Checkout infra repository
         uses: actions/checkout@v4
         with:
           repository: ${{ env.INFRA_REPOSITORY }}
-          ref: ${{ github.ref_name }}
+          ref: ${{ env.INFRA_BRANCH }}
           token: ${{ secrets.INFRA_REPO_TOKEN }}
           path: infra
           fetch-depth: 0
@@ -106,10 +114,10 @@ jobs:
 
           kubectl create namespace "$NAMESPACE" \
             --dry-run=client \
-            -o yaml | kubectl apply -f -
+            -o yaml |
+          kubectl apply -f -
 
-      # 변경: DB 이름과 Redis 정보를 추가로 조회
-      - name: Load AI service parameters from SSM
+      - name: Load AI service runtime parameters from SSM
         if: github.ref_name == 'dev'
         shell: bash
         run: |
@@ -157,6 +165,13 @@ jobs:
             --query "Parameter.Value" \
             --output text)
 
+          JWT_SECRET_KEY=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/jwt-secret-key" \
+            --region "$AWS_REGION" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text)
+
           OPENAI_API_KEY=$(aws ssm get-parameter \
             --name "/aims/dev/ai-service/openai-api-key" \
             --region "$AWS_REGION" \
@@ -172,15 +187,17 @@ jobs:
             "$SAMPLE_DB_NAME" \
             "$REDIS_HOST" \
             "$REDIS_PORT" \
-            "$OPENAI_API_KEY"
-          do
+            "$JWT_SECRET_KEY" \
+            "$OPENAI_API_KEY"; do
+
             if [ -z "$VALUE" ] || [ "$VALUE" = "None" ]; then
-              echo "Required AI service parameter is empty"
+              echo "Required AI service SSM parameter is empty"
               exit 1
             fi
           done
 
           echo "::add-mask::$RDS_SECRET_ARN"
+          echo "::add-mask::$JWT_SECRET_KEY"
           echo "::add-mask::$OPENAI_API_KEY"
 
           {
@@ -191,10 +208,10 @@ jobs:
             echo "SAMPLE_DB_NAME=$SAMPLE_DB_NAME"
             echo "REDIS_HOST=$REDIS_HOST"
             echo "REDIS_PORT=$REDIS_PORT"
+            echo "JWT_SECRET_KEY=$JWT_SECRET_KEY"
             echo "OPENAI_API_KEY=$OPENAI_API_KEY"
           } >> "$GITHUB_ENV"
 
-      # 변경: DB_HOST, DB_PORT, DB 이름, URL, Redis URL 추가
       - name: Create or update AI service Secret
         if: github.ref_name == 'dev'
         shell: bash
@@ -220,20 +237,23 @@ jobs:
             exit 1
           fi
 
-          echo "::add-mask::$DB_USER"
-          echo "::add-mask::$DB_PASSWORD"
-
           DB_USER_ENCODED=$(printf '%s' "$DB_USER" | jq -sRr @uri)
           DB_PASSWORD_ENCODED=$(printf '%s' "$DB_PASSWORD" | jq -sRr @uri)
 
           MAIN_DATABASE_URL="mysql+pymysql://${DB_USER_ENCODED}:${DB_PASSWORD_ENCODED}@${RDS_HOST}:${RDS_PORT}/${MAIN_DB_NAME}?charset=utf8mb4"
+
           REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}/0"
 
+          echo "::add-mask::$DB_USER"
+          echo "::add-mask::$DB_PASSWORD"
           echo "::add-mask::$MAIN_DATABASE_URL"
+          echo "::add-mask::$REDIS_URL"
+          echo "::add-mask::$JWT_SECRET_KEY"
 
           kubectl create secret generic ai-service-secret \
             --namespace "$NAMESPACE" \
             --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
+            --from-literal=JWT_SECRET_KEY="$JWT_SECRET_KEY" \
             --from-literal=MAIN_DATABASE_URL="$MAIN_DATABASE_URL" \
             --from-literal=DB_USER="$DB_USER" \
             --from-literal=DB_PASSWORD="$DB_PASSWORD" \
@@ -243,9 +263,9 @@ jobs:
             --from-literal=SAMPLE_DB_NAME="$SAMPLE_DB_NAME" \
             --from-literal=REDIS_URL="$REDIS_URL" \
             --dry-run=client \
-            -o yaml | kubectl apply -f -
+            -o yaml |
+          kubectl apply -f -
 
-      # 변경: image: 전체 URI가 아니라 newTag:만 변경
       - name: Update AI service image tag in GitOps repository
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
@@ -266,6 +286,7 @@ jobs:
             "s|^([[:space:]]*)newTag:.*$|\1newTag: ${IMAGE_TAG}|" \
             "$MANIFEST"
 
+          echo "Updated AI service image tag:"
           grep -n "newTag:" "$MANIFEST"
 
           cd infra
@@ -280,13 +301,18 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore(ai-service): deploy ${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
+          git diff --cached
 
-          for ATTEMPT in 1 2 3
-          do
-            git pull --rebase origin "$GITHUB_REF_NAME"
+          git commit \
+            -m "chore(ai-service): deploy ${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
 
-            if git push origin "HEAD:$GITHUB_REF_NAME"; then
+          for ATTEMPT in 1 2 3; do
+            echo "GitOps push attempt: $ATTEMPT"
+
+            git pull --rebase origin "$INFRA_BRANCH"
+
+            if git push origin "HEAD:$INFRA_BRANCH"; then
+              echo "GitOps image update pushed successfully"
               exit 0
             fi
 
