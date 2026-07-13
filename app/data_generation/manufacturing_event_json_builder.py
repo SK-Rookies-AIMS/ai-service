@@ -652,6 +652,159 @@ class ManufacturingEventJsonBuilder:
             )
             return
 
+        if process_code == "PAINT":
+            paint_is_warning = is_abnormal and (global_index % 3 == 0)
+            low_thickness_band = (global_index % 2) == 0
+
+            if is_abnormal and paint_is_warning:
+                rms_ampere = 1.82 + current_variation * 0.045
+                acceleration_g = 0.0065 + current_variation * 0.00045
+                vibration_score = min(0.55, 0.42 + vibration_variation * 0.012)
+                vibration_rms = 0.55 + vibration_variation * 0.028
+                vibration_peak = 0.82 + vibration_variation * 0.035
+                thermal_std_temp = round(2.25 + paint_variation * 0.18, 3)
+                defect_score = round(min(0.59, 0.42 + paint_variation * 0.018), 4)
+                thickness_value = round(
+                    85.0 + paint_variation * 0.45 if low_thickness_band else 121.0 + paint_variation * 0.85,
+                    3,
+                )
+                surface_quality_score = round(max(60.0, 78.0 - paint_variation * 1.05), 3)
+                cycle_time = target + 2.8 + metric_variation * 0.42
+                station_delay = cycle_time - target
+
+                current.update(
+                    rmsAmpere=round(rms_ampere, 3),
+                    maxAmpere=round(rms_ampere + 0.19 + current_variation * 0.012, 3),
+                    minAmpere=round(max(0.0, rms_ampere - 0.14), 3),
+                    accelerationG=round(acceleration_g, 5),
+                )
+                ford.update(
+                    label=1,
+                    vibrationScore=round(vibration_score, 4),
+                    vibrationRms=round(vibration_rms, 3),
+                    vibrationPeak=round(vibration_peak, 3),
+                )
+                vision.update(
+                    label=1,
+                    avgTemperature=round(41.5 + paint_variation * 0.42, 3),
+                    maxTemperature=round(46.0 + paint_variation * 0.48, 3),
+                    minTemperature=round(37.5 + paint_variation * 0.26, 3),
+                    thermalStdTemp=thermal_std_temp,
+                    defectScore=defect_score,
+                    thicknessValue=thickness_value,
+                    surfaceQualityScore=surface_quality_score,
+                )
+                bosch["response"] = 1
+                process_metrics.update(
+                    cycleTimeSec=round(cycle_time, 3),
+                    waitingTimeSec=round(4.2 + metric_variation * 0.32, 3),
+                    processingTimeSec=round(max(1.0, target - 1.2 + metric_variation * 0.16), 3),
+                    stationDelaySec=round(station_delay, 3),
+                    throughputPerMin=round(60 / cycle_time, 3),
+                    queueLength=4 + metric_variation,
+                    wipCount=12 + metric_variation * 2,
+                    equipmentIdleTimeSec=round(3.0 + metric_variation * 0.55, 3),
+                )
+                return
+
+            if is_abnormal:
+                rms_ampere = 2.08 + current_variation * 0.075
+                acceleration_g = 0.012 + current_variation * 0.0008
+                vibration_score = min(0.83, 0.65 + vibration_variation * 0.015)
+                vibration_rms = 1.1 + vibration_variation * 0.04
+                vibration_peak = 1.65 + vibration_variation * 0.05
+                thermal_std_temp = round(5.2 + paint_variation * 0.28, 3)
+                defect_score = round(min(0.99, 0.66 + paint_variation * 0.022), 4)
+                thickness_value = round(
+                    78.0 - paint_variation * 0.45 if low_thickness_band else 131.5 + paint_variation * 1.05,
+                    3,
+                )
+                surface_quality_score = round(max(0.0, 58.0 - paint_variation * 1.45), 3)
+                cycle_time = target + 6.8 + metric_variation * 0.92
+                station_delay = cycle_time - target
+
+                current.update(
+                    rmsAmpere=round(rms_ampere, 3),
+                    maxAmpere=round(rms_ampere + 0.29 + current_variation * 0.018, 3),
+                    minAmpere=round(max(0.0, rms_ampere - 0.22), 3),
+                    accelerationG=round(acceleration_g, 5),
+                )
+                ford.update(
+                    label=1,
+                    vibrationScore=round(vibration_score, 4),
+                    vibrationRms=round(vibration_rms, 3),
+                    vibrationPeak=round(vibration_peak, 3),
+                )
+                vision.update(
+                    label=1,
+                    avgTemperature=round(49.5 + paint_variation * 0.72, 3),
+                    maxTemperature=round(57.5 + paint_variation * 0.82, 3),
+                    minTemperature=round(42.0 + paint_variation * 0.48, 3),
+                    thermalStdTemp=thermal_std_temp,
+                    defectScore=defect_score,
+                    thicknessValue=thickness_value,
+                    surfaceQualityScore=surface_quality_score,
+                )
+                bosch["response"] = 1
+                process_metrics.update(
+                    cycleTimeSec=round(cycle_time, 3),
+                    waitingTimeSec=round(10.5 + metric_variation * 0.95, 3),
+                    processingTimeSec=round(max(1.0, target - 2.8 + metric_variation * 0.35), 3),
+                    stationDelaySec=round(station_delay, 3),
+                    throughputPerMin=round(60 / cycle_time, 3),
+                    queueLength=8 + metric_variation,
+                    wipCount=22 + metric_variation * 2,
+                    equipmentIdleTimeSec=round(10.0 + metric_variation * 1.1, 3),
+                )
+                return
+
+            rms_ampere = 1.62 + current_variation * 0.028
+            acceleration_g = 0.0045 + current_variation * 0.0003
+            vibration_score = 0.11 + vibration_variation * 0.008
+            vibration_rms = 0.24 + vibration_variation * 0.018
+            vibration_peak = 0.41 + vibration_variation * 0.022
+            thermal_std_temp = round(0.68 + paint_variation * 0.12, 3)
+            defect_score = round(min(0.39, 0.10 + paint_variation * 0.027), 4)
+            thickness_value = round(99.0 + paint_variation * 1.5, 3)
+            surface_quality_score = round(max(80.0, 92.0 - paint_variation * 1.25), 3)
+            cycle_time = target + 0.35 + metric_variation * 0.14
+            station_delay = max(0.0, cycle_time - target)
+
+            current.update(
+                rmsAmpere=round(rms_ampere, 3),
+                maxAmpere=round(rms_ampere + 0.13 + current_variation * 0.008, 3),
+                minAmpere=round(max(0.0, rms_ampere - 0.11), 3),
+                accelerationG=round(acceleration_g, 5),
+            )
+            ford.update(
+                label=0,
+                vibrationScore=round(vibration_score, 4),
+                vibrationRms=round(vibration_rms, 3),
+                vibrationPeak=round(vibration_peak, 3),
+            )
+            vision.update(
+                label=0,
+                avgTemperature=round(38.6 + paint_variation * 0.22, 3),
+                maxTemperature=round(40.8 + paint_variation * 0.2, 3),
+                minTemperature=round(36.9 + paint_variation * 0.12, 3),
+                thermalStdTemp=thermal_std_temp,
+                defectScore=defect_score,
+                thicknessValue=thickness_value,
+                surfaceQualityScore=surface_quality_score,
+            )
+            bosch["response"] = 0
+            process_metrics.update(
+                cycleTimeSec=round(cycle_time, 3),
+                waitingTimeSec=round(1.8 + metric_variation * 0.12, 3),
+                processingTimeSec=round(max(1.0, target - 2.2 + metric_variation * 0.1), 3),
+                stationDelaySec=round(station_delay, 3),
+                throughputPerMin=round(60 / cycle_time, 3),
+                queueLength=2 + metric_variation % 3,
+                wipCount=5 + metric_variation,
+                equipmentIdleTimeSec=round(metric_variation * 0.18, 3),
+            )
+            return
+
         if is_abnormal:
             current_variation = global_index % 11
             vibration_variation = global_index % 13
