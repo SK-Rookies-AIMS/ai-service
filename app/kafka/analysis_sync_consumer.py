@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from threading import Event
 from typing import Any
 
@@ -51,47 +52,66 @@ def _run_analysis_sync_consumer(
     stop_event: Event,
     consumer_index: int,
 ) -> None:
-    consumer = create_consumer(
-        kafka_config.ANALYSIS_SYNC_TOPIC,
-        kafka_config.ANALYSIS_SYNC_CONSUMER_GROUP_ID,
-        enable_auto_commit=False,
-        consumer_timeout_ms=kafka_config.CONSUMER_TIMEOUT_MS,
-    )
     search_repository = ProcessAnalysisSearchRepository()
-    try:
-        search_repository.ensure_indices()
-    except Exception:
-        logger.exception("Failed to ensure Elasticsearch indices for analysis sync.")
-        consumer.close()
-        return
-
+    reconnect_delay_sec = 5.0
+    consumer: Any | None = None
     logger.info(
-        "Analysis sync consumer started: topic=%s group=%s consumer_index=%s",
+        "Analysis sync consumer starting: topic=%s group=%s consumer_index=%s",
         kafka_config.ANALYSIS_SYNC_TOPIC,
         kafka_config.ANALYSIS_SYNC_CONSUMER_GROUP_ID,
         consumer_index,
     )
     try:
         while not stop_event.is_set():
-            for message in consumer:
-                if stop_event.is_set():
+            try:
+                consumer = create_consumer(
+                    kafka_config.ANALYSIS_SYNC_TOPIC,
+                    kafka_config.ANALYSIS_SYNC_CONSUMER_GROUP_ID,
+                    enable_auto_commit=False,
+                    consumer_timeout_ms=kafka_config.CONSUMER_TIMEOUT_MS,
+                )
+                search_repository.ensure_indices()
+                logger.info(
+                    "Analysis sync consumer connected: topic=%s group=%s consumer_index=%s",
+                    kafka_config.ANALYSIS_SYNC_TOPIC,
+                    kafka_config.ANALYSIS_SYNC_CONSUMER_GROUP_ID,
+                    consumer_index,
+                )
+                while not stop_event.is_set():
+                    for message in consumer:
+                        if stop_event.is_set():
+                            break
+                        try:
+                            payload = message.value
+                            if not isinstance(payload, dict):
+                                logger.warning("Skipping non-dict analysis sync payload.")
+                                continue
+                            search_repository.index_sync_event(payload)
+                            consumer.commit()
+                        except Exception:
+                            logger.exception(
+                                "Failed to index analysis sync event: topic=%s partition=%s offset=%s",
+                                message.topic,
+                                message.partition,
+                                message.offset,
+                            )
+                            raise
+            except Exception:
+                logger.exception(
+                    "Analysis sync consumer will retry after ES/Kafka failure: topic=%s group=%s consumer_index=%s",
+                    kafka_config.ANALYSIS_SYNC_TOPIC,
+                    kafka_config.ANALYSIS_SYNC_CONSUMER_GROUP_ID,
+                    consumer_index,
+                )
+                if stop_event.wait(reconnect_delay_sec):
                     break
-                try:
-                    payload = message.value
-                    if not isinstance(payload, dict):
-                        logger.warning("Skipping non-dict analysis sync payload.")
-                        continue
-                    search_repository.index_sync_event(payload)
-                    consumer.commit()
-                except Exception:
-                    logger.exception(
-                        "Failed to index analysis sync event: topic=%s partition=%s offset=%s",
-                        message.topic,
-                        message.partition,
-                        message.offset,
-                    )
+            finally:
+                if consumer is not None:
+                    consumer.close()
+                    consumer = None
     finally:
-        consumer.close()
+        if consumer is not None:
+            consumer.close()
         logger.info(
             "Analysis sync consumer stopped: topic=%s group=%s consumer_index=%s",
             kafka_config.ANALYSIS_SYNC_TOPIC,

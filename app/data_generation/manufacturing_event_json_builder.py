@@ -1173,7 +1173,7 @@ class ManufacturingEventJsonBuilder:
     def _load_forming(self) -> pd.DataFrame:
         return self._cached_csv(
             "forming",
-            self.dataset_root / "?뚯꽦媛怨??먯썝理쒖쟻??AI ?곗씠?곗뀑" / "怨듭젙_?곗씠??2022??8??csv",
+            self.dataset_root / "소성가공 자원최적화 AI 데이터셋" / "공정_데이터_2022년_8월.csv",
             nrows=4096,
         )
 
@@ -1182,8 +1182,8 @@ class ManufacturingEventJsonBuilder:
         return self._cached_csv(
             f"press_current_{file_index}",
             self.dataset_root
-            / "?뚯꽦媛怨??먯썝理쒖쟻??AI ?곗씠?곗뀑"
-            / f"?꾨젅??{file_index}???좎븬紐⑦꽣_?꾨쪟?곗씠??csv",
+            / "소성가공 자원최적화 AI 데이터셋"
+            / f"프레스_{file_index}호-유압모터_전류데이터.csv",
             nrows=4096,
         )
 
@@ -1192,15 +1192,15 @@ class ManufacturingEventJsonBuilder:
         return self._cached_csv(
             f"robot_current_{file_index}",
             self.dataset_root
-            / "?뚯꽦媛怨??먯썝理쒖쟻??AI ?곗씠?곗뀑"
-            / f"濡쒕큸_{file_index}???꾨쪟_?곗씠??csv",
+            / "소성가공 자원최적화 AI 데이터셋"
+            / f"로봇_{file_index}호-전류_데이터.csv",
             nrows=4096,
         )
 
     def _load_vision(self, side: str) -> tuple[pd.DataFrame, list[float]]:
         cache_key = f"vision_{side}"
         if cache_key not in self._cache:
-            base = self.dataset_root / "癒몄떊鍮꾩쟾 AI ?곗씠?곗뀑 (?댄솕??湲곕컲 ?덉쭏 寃???곗씠??"
+            base = self.dataset_root / "머신비전 AI 데이터셋 (열화상 기반 품질 검사 데이터)"
             df = pd.read_csv(base / f"2nd_process_{side}_data.csv", nrows=4096)
             with (base / f"2nd_process_{side}_label.json").open(
                 encoding="utf-8",
@@ -1218,7 +1218,7 @@ class ManufacturingEventJsonBuilder:
 
     def _load_ford_rows(self) -> list[list[float]]:
         if "ford_train" not in self._cache:
-            base = self.dataset_root / "Ford ?붿쭊 吏꾨룞 ?곗씠?곗뀑"
+            base = self.dataset_root / "Ford 엔진 진동 데이터셋"
             path = base / "FordA_TRAIN.txt"
             rows: list[list[float]] = []
             with path.open(encoding="utf-8", errors="ignore") as file:
