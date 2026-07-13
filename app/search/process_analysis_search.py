@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date as DateType
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -149,8 +150,11 @@ class ProcessAnalysisSearchRepository:
         *,
         cursor: int,
         size: int,
+        analysis_date: DateType | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        latest_snapshot_id = self._latest_bottleneck_snapshot_id()
+        latest_snapshot_id = self._latest_bottleneck_snapshot_id(
+            analysis_date=analysis_date,
+        )
         if not latest_snapshot_id:
             return [], False
 
@@ -210,6 +214,7 @@ class ProcessAnalysisSearchRepository:
         *,
         cursor: int,
         size: int,
+        analysis_date: DateType | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         page = max(cursor, 0)
         safe_size = max(1, min(size, 100))
@@ -226,6 +231,8 @@ class ProcessAnalysisSearchRepository:
             "size": safe_size + 1,
             "track_total_hits": True,
         }
+        if analysis_date is not None:
+            query["query"] = self._date_range_query("predictedAt", analysis_date)
         response = self.client.search(
             index=settings.elasticsearch_defect_transfer_index,
             body=query,
@@ -241,6 +248,7 @@ class ProcessAnalysisSearchRepository:
         self,
         *,
         vehicle_id: str | None,
+        analysis_date: DateType | None = None,
     ) -> dict[str, Any] | None:
         query: dict[str, Any] = {
             "size": 1,
@@ -253,6 +261,13 @@ class ProcessAnalysisSearchRepository:
             query["query"] = {"term": {"vehicleId": vehicle_id}}
         else:
             query["query"] = {"match_all": {}}
+        if analysis_date is not None:
+            query["query"] = {
+                "bool": {
+                    "must": [query["query"]],
+                    "filter": [self._date_range_query("predictedAt", analysis_date)],
+                },
+            }
 
         response = self.client.search(
             index=settings.elasticsearch_defect_transfer_index,
@@ -263,7 +278,11 @@ class ProcessAnalysisSearchRepository:
             return None
         return self._map_defect_source(hits[0].get("_source") or {})
 
-    def _latest_bottleneck_snapshot_id(self) -> str | None:
+    def _latest_bottleneck_snapshot_id(
+        self,
+        *,
+        analysis_date: DateType | None = None,
+    ) -> str | None:
         query = {
             "size": 1,
             "query": {"match_all": {}},
@@ -273,6 +292,8 @@ class ProcessAnalysisSearchRepository:
                 {"syncId": {"order": "desc"}},
             ],
         }
+        if analysis_date is not None:
+            query["query"] = self._date_range_query("detectedAt", analysis_date)
         response = self.client.search(
             index=settings.elasticsearch_bottleneck_index,
             body=query,
@@ -283,6 +304,18 @@ class ProcessAnalysisSearchRepository:
         source = hits[0].get("_source") or {}
         snapshot_id = source.get("snapshotId")
         return str(snapshot_id) if snapshot_id is not None else None
+
+    @staticmethod
+    def _date_range_query(field: str, analysis_date: DateType) -> dict[str, Any]:
+        next_date = analysis_date.fromordinal(analysis_date.toordinal() + 1)
+        return {
+            "range": {
+                field: {
+                    "gte": analysis_date.isoformat(),
+                    "lt": next_date.isoformat(),
+                },
+            },
+        }
 
     def _bulk_index(self, actions: list[dict[str, Any]]) -> None:
         if not actions:

@@ -106,8 +106,9 @@ class DefectTransferPredictionRepository:
         *,
         cursor: int,
         size: int,
+        analysis_date: date | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        rows = self._all_prediction_rows()
+        rows = self._all_prediction_rows(analysis_date=analysis_date)
         latest_by_car: dict[int, dict[str, Any]] = {}
         for row in rows:
             car_id = int(row["car_master_id"])
@@ -141,10 +142,12 @@ class DefectTransferPredictionRepository:
         vehicle_id: str | None,
         cursor: int,
         size: int,
+        analysis_date: date | None = None,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool]:
         car_master_id = self._car_master_id(vehicle_id) if vehicle_id else None
         rows = self._all_prediction_rows(
             car_master_id=car_master_id,
+            analysis_date=analysis_date,
         )
         if not rows:
             return None, [], False
@@ -173,22 +176,51 @@ class DefectTransferPredictionRepository:
         from sqlalchemy import func, select
 
         car_master_id = self._car_master_id(vehicle_id) if vehicle_id else None
-        event_ids = self._prediction_event_ids(car_master_id=car_master_id)
-        if not event_ids:
-            return []
 
         query = (
             select(
-                func.date(manufacturing_event_json.c.event_time).label("date"),
-                func.min(manufacturing_event_json.c.event_id).label("sample_event_id"),
+                func.date(self.table.c.predicted_at).label("date"),
+                func.min(self.table.c.manufacturing_event_id).label(
+                    "sample_manufacturing_event_id",
+                ),
             )
-            .where(manufacturing_event_json.c.id.in_(event_ids))
-            .where(manufacturing_event_json.c.event_time.is_not(None))
-            .group_by(func.date(manufacturing_event_json.c.event_time))
-            .order_by(func.date(manufacturing_event_json.c.event_time).desc())
+            .where(self.table.c.predicted_at.is_not(None))
+            .group_by(func.date(self.table.c.predicted_at))
+            .order_by(func.date(self.table.c.predicted_at).desc())
         )
-        with self.event_engine.connect() as conn:
-            return [dict(row) for row in conn.execute(query).mappings()]
+        if car_master_id is not None:
+            query = query.where(self.table.c.car_master_id == car_master_id)
+        with self.engine.connect() as conn:
+            date_rows = [dict(row) for row in conn.execute(query).mappings()]
+
+        sample_event_ids = sorted(
+            {
+                int(row["sample_manufacturing_event_id"])
+                for row in date_rows
+                if row.get("sample_manufacturing_event_id") is not None
+            },
+        )
+        event_id_by_id: dict[int, str] = {}
+        if sample_event_ids:
+            event_query = select(
+                manufacturing_event_json.c.id,
+                manufacturing_event_json.c.event_id,
+            ).where(manufacturing_event_json.c.id.in_(sample_event_ids))
+            with self.event_engine.connect() as conn:
+                for event_row in conn.execute(event_query).mappings():
+                    event_id_by_id[int(event_row["id"])] = str(event_row["event_id"])
+
+        return [
+            {
+                "date": row["date"],
+                "sample_event_id": (
+                    event_id_by_id.get(int(row["sample_manufacturing_event_id"]))
+                    if row.get("sample_manufacturing_event_id") is not None
+                    else None
+                ),
+            }
+            for row in date_rows
+        ]
 
     def diagnostics(self) -> dict[str, Any]:
         from sqlalchemy import distinct, func, select
@@ -278,18 +310,15 @@ class DefectTransferPredictionRepository:
         self,
         *,
         car_master_id: int | None = None,
+        analysis_date: date | None = None,
     ) -> list[dict[str, Any]]:
-        from sqlalchemy import select
+        from sqlalchemy import func, select
 
-        event_ids = self._prediction_event_ids(car_master_id=car_master_id)
-        if not event_ids:
-            return []
-
-        query = select(self.table).where(
-            self.table.c.manufacturing_event_id.in_(event_ids),
-        )
+        query = select(self.table)
         if car_master_id is not None:
             query = query.where(self.table.c.car_master_id == car_master_id)
+        if analysis_date is not None:
+            query = query.where(func.date(self.table.c.predicted_at) == analysis_date)
         query = query.order_by(
             self.table.c.predicted_at.desc(),
             self.table.c.id.desc(),
@@ -326,15 +355,23 @@ class DefectTransferPredictionRepository:
             value = conn.execute(query).scalar()
         return int(value) if value is not None else None
 
-    def _prediction_event_ids(self, *, car_master_id: int | None = None) -> list[int]:
+    def _prediction_event_ids(
+        self,
+        *,
+        car_master_id: int | None = None,
+        analysis_date: date | None = None,
+    ) -> list[int]:
         from sqlalchemy import func, select
 
         query = (
             select(manufacturing_event_json.c.id)
             .where(manufacturing_event_json.c.dispatch_status == "SENT")
             .where(manufacturing_event_json.c.is_sent.is_(True))
-            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
         )
+        if analysis_date is None:
+            query = query.where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+        else:
+            query = query.where(func.date(manufacturing_event_json.c.event_time) == analysis_date)
         if car_master_id is not None:
             query = query.where(manufacturing_event_json.c.car_master_id == car_master_id)
         with self.event_engine.connect() as conn:

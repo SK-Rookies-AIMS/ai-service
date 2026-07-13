@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query
+from datetime import date as DateType
 
 from app.dto.response import BottleneckAnalysisPage, CommonResponse
 from app.service.analysis.bottleneck_service import (
@@ -94,6 +95,10 @@ BottleneckAnalysisExample = {
     },
 )
 def get_bottleneck_analysis(
+    date: DateType | None = Query(
+        default=None,
+        description="조회할 날짜입니다. 미지정 시 최신 날짜를 사용합니다.",
+    ),
     cursor: int | None = Query(
         default=None,
         ge=0,
@@ -116,6 +121,7 @@ def get_bottleneck_analysis(
     page: BottleneckAnalysisPage = service.get_cached_realtime_bottlenecks(
         cursor=cursor,
         size=size,
+        date=date,
     )
     return success_response(
         data=page,

@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.dto.response.analysis_common import AnalysisDateOption
+
 
 class DefectTransferPredictionItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -25,6 +27,7 @@ class DefectTransferPredictionPage(BaseModel):
     date: DateType | None = None
     from_: datetime | None = Field(default=None, alias="from")
     to: datetime | None = None
+    date_options: list[AnalysisDateOption] = Field(default_factory=list, alias="dateOptions")
     has_next: bool = Field(alias="hasNext")
     next_cursor: int | None = Field(alias="nextCursor")
 
@@ -55,5 +58,6 @@ class DefectTransferCausePage(BaseModel):
     date: DateType | None = None
     from_: datetime | None = Field(default=None, alias="from")
     to: datetime | None = None
+    date_options: list[AnalysisDateOption] = Field(default_factory=list, alias="dateOptions")
     has_next: bool = Field(alias="hasNext")
     next_cursor: int | None = Field(alias="nextCursor")
