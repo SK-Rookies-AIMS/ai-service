@@ -1147,6 +1147,30 @@ def _vary_process_metrics(metrics: dict[str, Any], seed_key: str) -> None:
     metrics["equipmentIdleTimeSec"] = idle_time
 
 
+def _press_count_increase_flag(
+    *,
+    station_delay_sec: float,
+    equipment_idle_time_sec: float,
+) -> bool | None:
+    if station_delay_sec <= 2.0 and equipment_idle_time_sec < 6.0:
+        return True
+    if station_delay_sec <= 3.0:
+        return None
+    return False
+
+
+def _body_robot_motion_status(vibration_score: float) -> str:
+    if vibration_score >= 0.45:
+        return "ABNORMAL"
+    if vibration_score >= 0.40:
+        return "WARNING"
+    return "NORMAL"
+
+
+def _body_robot_operation_mode(vibration_score: float) -> str:
+    return "STOPPED" if vibration_score >= 0.45 else "AUTO"
+
+
 def _sync_process_data(
     process_data: dict[str, Any],
     sensor: dict[str, Any],
@@ -1160,16 +1184,18 @@ def _sync_process_data(
     press = process_data.get("press")
     if isinstance(press, dict):
         press["timestampDelaySec"] = metrics.get("stationDelaySec", 0.0)
-        press["countIncreaseYn"] = _as_float(
-            metrics.get("equipmentIdleTimeSec"),
-        ) < 18.0
+        press["countIncreaseYn"] = _press_count_increase_flag(
+            station_delay_sec=_as_float(metrics.get("stationDelaySec")),
+            equipment_idle_time_sec=_as_float(metrics.get("equipmentIdleTimeSec")),
+        )
 
     body = process_data.get("body")
     if isinstance(body, dict):
         robot_score = _as_float(
             sensor.get("robotArmVibration", {}).get("vibrationScore"),
         )
-        body["robotMotionStatus"] = "WARNING" if robot_score >= 0.68 else "NORMAL"
+        body["robotMotionStatus"] = _body_robot_motion_status(robot_score)
+        body["robotOperationMode"] = _body_robot_operation_mode(robot_score)
 
     paint = process_data.get("paint")
     if isinstance(paint, dict):
