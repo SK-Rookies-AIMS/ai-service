@@ -11,7 +11,7 @@ from app.utils.database_utils import mysql_connect_args_for_seoul
 
 
 class BottleneckAnalysisRepository:
-    """Store bottleneck results and read source events from manufacturing_event_json."""
+    """병목 분석 결과를 저장하고 sampledb.manufacturing_event_json 원천 이벤트를 읽는다."""
 
     def __init__(
         self,
@@ -30,6 +30,8 @@ class BottleneckAnalysisRepository:
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
+        """병목 결과 테이블이 없거나 구조가 다르면 DB 스키마를 맞춘다."""
+        # 병목 결과 테이블이 없거나 컬럼이 다르면 여기서 맞춘다.
         self.metadata.create_all(self.engine)
         self._align_result_schema()
 
@@ -41,6 +43,7 @@ class BottleneckAnalysisRepository:
         start_rank: int,
         end_rank: int,
     ) -> None:
+        """계산된 병목 순위 결과를 detected_at 스냅샷으로 저장한다."""
         payload = [
             {
                 key: value
@@ -52,10 +55,12 @@ class BottleneckAnalysisRepository:
         if not payload:
             return
 
+        # 새 분석 결과를 한 번에 저장한다.
         with self.engine.begin() as conn:
             conn.execute(self.table.insert(), payload)
 
     def prune_results_after_rank(self, max_rank: int) -> None:
+        """현재 날짜의 병목 결과 중 상위 순위만 남기고 나머지를 삭제한다."""
         from sqlalchemy import func
         with self.engine.begin() as conn:
             conn.execute(
@@ -71,6 +76,8 @@ class BottleneckAnalysisRepository:
         size: int,
         analysis_date: DateType | None = None,
     ) -> list[dict[str, Any]]:
+        """지정한 날짜의 최신 병목 스냅샷을 기준으로 결과 목록을 반환한다."""
+        # detected_at 스냅샷 기준으로 같은 날짜의 병목 결과만 읽는다.
         snapshot_detected_at = self._latest_snapshot_detected_at(analysis_date)
         if snapshot_detected_at is None:
             return []
@@ -109,6 +116,8 @@ class BottleneckAnalysisRepository:
         *,
         analysis_date: DateType | None = None,
     ) -> int:
+        """지정한 날짜의 최신 병목 결과 건수를 반환한다."""
+        # 조회 기준 날짜의 결과 건수를 세어 페이지네이션 여부를 판단한다.
         snapshot_detected_at = self._latest_snapshot_detected_at(analysis_date)
         if snapshot_detected_at is None:
             return 0
@@ -129,6 +138,7 @@ class BottleneckAnalysisRepository:
         return len(self.list_results(cursor=0, size=raw_count))
 
     def delete_results_by_date(self, analysis_date: DateType) -> int:
+        """병목 결과 테이블에서 특정 날짜 스냅샷을 제거한다."""
         from sqlalchemy import func
 
         with self.engine.begin() as conn:
@@ -142,6 +152,8 @@ class BottleneckAnalysisRepository:
         *,
         analysis_date: DateType | None = None,
     ) -> list[dict[str, Any]]:
+        """병목 분석용 원천 이벤트를 sampledb에서 읽어온다."""
+        # 병목 분석 대상 원천 이벤트를 sampledb에서 읽는다.
         from sqlalchemy import select, func
 
         query = (
@@ -173,6 +185,8 @@ class BottleneckAnalysisRepository:
         *,
         analysis_date: DateType | None = None,
     ) -> list[dict[str, Any]]:
+        """아직 병목 분석이 끝나지 않은 원천 이벤트만 가져온다."""
+        # 아직 병목 분석이 끝나지 않은 원천 이벤트만 다시 가져온다.
         from sqlalchemy import select, func
 
         query = (
@@ -201,6 +215,8 @@ class BottleneckAnalysisRepository:
             ]
 
     def list_date_options(self) -> list[dict[str, Any]]:
+        """dateOptions 표시용으로 detected_at 날짜와 대표 event_id를 묶어 반환한다."""
+        # 날짜 선택 UI용으로 detected_at 기준 옵션을 만든다.
         from sqlalchemy import func, select
 
         query = (
@@ -247,6 +263,7 @@ class BottleneckAnalysisRepository:
         ]
 
     def _event_ids_for_today(self) -> list[int]:
+        """오늘 날짜로 들어온 병목 대상 이벤트 id 목록을 조회한다."""
         from sqlalchemy import func, select
 
         query = (

@@ -10,7 +10,7 @@ from app.utils.process_label_utils import NEXT_PROCESS, equipment_code_for_car_p
 
 
 class DefectTransferPredictionRepository:
-    """Store and read defect-transfer prediction results in main_db."""
+    """불량 전이 예측 결과를 main_db에 저장하고 sampledb 원천 이벤트를 읽는다."""
 
     def __init__(
         self,
@@ -29,6 +29,7 @@ class DefectTransferPredictionRepository:
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
+        """불량 전이 결과 테이블의 스키마를 DB에 맞게 생성하거나 보정한다."""
         self.metadata.create_all(self.engine)
         self._align_result_schema()
 
@@ -47,6 +48,9 @@ class DefectTransferPredictionRepository:
         causes: list[dict[str, Any]],
         predicted_at: datetime,
     ) -> int:
+        """하나의 제조 이벤트에 대한 예측 결과를 최신 값으로 다시 저장한다."""
+        """하나의 제조 이벤트에 대한 예측 결과를 최신 값으로 다시 저장한다."""
+        # 하나의 제조 이벤트에 대해 예측 결과 1건만 유지한다.
         manufacturing_event_id = self._manufacturing_event_id(event_id)
         main_causes = self._normalize_main_causes(causes)
         cause_rows = causes or [
@@ -86,6 +90,7 @@ class DefectTransferPredictionRepository:
         return 1
 
     def has_prediction_for_event(self, event_id: str) -> bool:
+        """이미 해당 이벤트의 예측 결과가 저장되어 있는지 확인한다."""
         manufacturing_event_id = self._manufacturing_event_id(event_id)
         if manufacturing_event_id is None:
             return False
@@ -107,6 +112,8 @@ class DefectTransferPredictionRepository:
         size: int,
         analysis_date: date | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
+        """차량별 최신 예측 결과를 모아 목록 페이지를 만든다."""
+        # 차량별 최신 예측만 추려서 목록 페이지를 만든다.
         rows = self._all_prediction_rows(analysis_date=analysis_date)
         latest_by_car: dict[int, dict[str, Any]] = {}
         for row in rows:
@@ -141,6 +148,7 @@ class DefectTransferPredictionRepository:
         analysis_date: date | None = None,
         car_master_id: int | None = None,
     ) -> list[dict[str, Any]]:
+        """조건에 맞는 불량 전이 결과 원본 row를 모두 반환한다."""
         return self._all_prediction_rows(
             car_master_id=car_master_id,
             analysis_date=analysis_date,
@@ -154,6 +162,8 @@ class DefectTransferPredictionRepository:
         size: int,
         analysis_date: date | None = None,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool]:
+        """대표 원인 1개와 상세 원인 리스트를 함께 반환한다."""
+        # 대표 원인 1개와 상세 원인 목록을 같은 이벤트 묶음으로 반환한다.
         car_master_id = self._car_master_id(vehicle_id) if vehicle_id else None
         rows = self._all_prediction_rows(
             car_master_id=car_master_id,
@@ -183,6 +193,8 @@ class DefectTransferPredictionRepository:
         return latest_rows[0], page, len(latest_rows) > offset + size
 
     def list_date_options(self, *, vehicle_id: str | None = None) -> list[dict[str, Any]]:
+        """predicted_at 기준으로 날짜 선택 옵션을 생성한다."""
+        # 날짜 선택용 옵션은 predicted_at 기준으로 만든다.
         from sqlalchemy import func, select
 
         car_master_id = self._car_master_id(vehicle_id) if vehicle_id else None
@@ -233,6 +245,8 @@ class DefectTransferPredictionRepository:
         ]
 
     def diagnostics(self) -> dict[str, Any]:
+        """원천 이벤트와 예측 결과의 현재 적재 상태를 점검한다."""
+        # 원천 이벤트, 예측 결과, 최신 상태를 한 번에 점검한다.
         from sqlalchemy import distinct, func, select
 
         with self.event_engine.connect() as conn:
@@ -331,6 +345,7 @@ class DefectTransferPredictionRepository:
         car_master_id: int | None = None,
         analysis_date: date | None = None,
     ) -> list[dict[str, Any]]:
+        """필요한 조건에 맞는 예측 결과 원본 row를 조회한다."""
         from sqlalchemy import func, select
 
         query = select(self.table)
@@ -432,6 +447,7 @@ class DefectTransferPredictionRepository:
         car_master_id: int | None = None,
         analysis_date: date | None = None,
     ) -> list[int]:
+        """분석 대상 manufacturing_event_json id를 필터링해서 반환한다."""
         from sqlalchemy import func, select
 
         query = (
@@ -450,6 +466,7 @@ class DefectTransferPredictionRepository:
 
     @staticmethod
     def _normalize_probability(value: Any) -> float:
+        """확률값이 0~1 또는 0~100 형태여도 화면용 소수로 맞춘다."""
         if value is None:
             return 0.0
         normalized = float(value)
@@ -459,6 +476,7 @@ class DefectTransferPredictionRepository:
 
     @classmethod
     def _result_probability(cls, row: dict[str, Any]) -> float:
+        """현재 화면에서 사용할 대표 확률값을 선택한다."""
         value = row.get("current_defect_probability")
         if value is None:
             value = row.get("target_defect_probability")
@@ -469,6 +487,7 @@ class DefectTransferPredictionRepository:
         return cls._normalize_probability(value)
 
     def _attach_process_equipment_codes(self, rows: list[dict[str, Any]]) -> None:
+        """화면 표시에 필요한 공정명과 설비 코드를 보강한다."""
         if not rows:
             return
         from sqlalchemy import select
@@ -574,6 +593,7 @@ class DefectTransferPredictionRepository:
         return NEXT_PROCESS.get(source)
 
     def _attach_vehicle_ids(self, rows: list[dict[str, Any]]) -> None:
+        """manufacturing_event_id를 기반으로 vehicle_id를 붙인다."""
         if not rows:
             return
         from sqlalchemy import select
@@ -594,6 +614,7 @@ class DefectTransferPredictionRepository:
             )
 
     def _init_sqlalchemy(self) -> None:
+        """예측 결과 저장소의 SQLAlchemy 테이블과 엔진을 준비한다."""
         try:
             from sqlalchemy import BigInteger, Column, DateTime, Double, Enum, JSON
             from sqlalchemy import Index, Integer, MetaData, String, Table, func
@@ -646,6 +667,7 @@ class DefectTransferPredictionRepository:
         )
 
     def _align_result_schema(self) -> None:
+        """기존 결과 테이블과 현재 코드의 컬럼 구조를 맞춘다."""
         if self.engine.dialect.name != "mysql":
             return
 
@@ -715,6 +737,7 @@ class DefectTransferPredictionRepository:
 
     @staticmethod
     def _normalize_main_causes(causes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """상위 원인 목록을 저장용 간단한 구조로 정리한다."""
         normalized: list[dict[str, Any]] = []
         for cause in causes[:5]:
             message = str(cause.get("message") or cause.get("label") or "").strip()

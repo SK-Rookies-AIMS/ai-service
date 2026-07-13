@@ -1147,6 +1147,30 @@ def _vary_process_metrics(metrics: dict[str, Any], seed_key: str) -> None:
     metrics["equipmentIdleTimeSec"] = idle_time
 
 
+def _press_count_increase_flag(
+    *,
+    station_delay_sec: float,
+    equipment_idle_time_sec: float,
+) -> bool | None:
+    if station_delay_sec <= 2.0 and equipment_idle_time_sec < 6.0:
+        return True
+    if station_delay_sec <= 3.0:
+        return None
+    return False
+
+
+def _body_robot_motion_status(vibration_score: float) -> str:
+    if vibration_score >= 0.45:
+        return "ABNORMAL"
+    if vibration_score >= 0.40:
+        return "WARNING"
+    return "NORMAL"
+
+
+def _body_robot_operation_mode(vibration_score: float) -> str:
+    return "STOPPED" if vibration_score >= 0.45 else "AUTO"
+
+
 def _sync_process_data(
     process_data: dict[str, Any],
     sensor: dict[str, Any],
@@ -1160,49 +1184,97 @@ def _sync_process_data(
     press = process_data.get("press")
     if isinstance(press, dict):
         press["timestampDelaySec"] = metrics.get("stationDelaySec", 0.0)
-        press["countIncreaseYn"] = _as_float(
-            metrics.get("equipmentIdleTimeSec"),
-        ) < 18.0
+        press["countIncreaseYn"] = _press_count_increase_flag(
+            station_delay_sec=_as_float(metrics.get("stationDelaySec")),
+            equipment_idle_time_sec=_as_float(metrics.get("equipmentIdleTimeSec")),
+        )
 
     body = process_data.get("body")
     if isinstance(body, dict):
         robot_score = _as_float(
             sensor.get("robotArmVibration", {}).get("vibrationScore"),
         )
-        body["robotMotionStatus"] = "WARNING" if robot_score >= 0.68 else "NORMAL"
+        body["robotMotionStatus"] = _body_robot_motion_status(robot_score)
+        body["robotOperationMode"] = _body_robot_operation_mode(robot_score)
 
     paint = process_data.get("paint")
     if isinstance(paint, dict):
-        paint["thermalStdTemp"] = _jitter_numeric(
+        thermal_std_temp = _jitter_numeric(
             _as_float(paint.get("thermalStdTemp")),
             seed_key,
             "paint.thermalStdTemp",
-            pct=0.04,
-            absolute=0.12,
+            pct=0.05,
+            absolute=0.18,
             precision=3,
             min_value=0.0,
         )
-        paint["thicknessValue"] = _jitter_numeric(
+        original_thermal_std_temp = _as_float(paint.get("thermalStdTemp"))
+        if original_thermal_std_temp < 2.0:
+            thermal_std_temp = min(1.99, thermal_std_temp)
+        elif original_thermal_std_temp < 5.0:
+            thermal_std_temp = min(4.99, max(2.0, thermal_std_temp))
+        else:
+            thermal_std_temp = max(5.0, thermal_std_temp)
+        paint["thermalStdTemp"] = _round(thermal_std_temp, 3)
+
+        thickness_value = _jitter_numeric(
             _as_float(paint.get("thicknessValue")),
             seed_key,
             "paint.thicknessValue",
-            pct=0.004,
-            absolute=0.45,
+            pct=0.01,
+            absolute=0.9,
             precision=3,
             min_value=0.0,
         )
+        original_thickness_value = _as_float(paint.get("thicknessValue"))
+        if original_thickness_value < 80.0:
+            thickness_value = min(79.9, thickness_value)
+        elif original_thickness_value < 90.0:
+            thickness_value = min(89.9, max(80.0, thickness_value))
+        elif original_thickness_value <= 120.0:
+            thickness_value = min(120.0, max(90.0, thickness_value))
+        elif original_thickness_value <= 130.0:
+            thickness_value = min(130.0, max(120.0, thickness_value))
+        else:
+            thickness_value = max(130.1, thickness_value)
+        paint["thicknessValue"] = _round(thickness_value, 3)
+
+        original_defect_score = _as_float(paint.get("defectScore"))
         defect_score = _round(
             _clamp(
-                _as_float(paint.get("defectScore"))
+                original_defect_score
                 + _noise(seed_key, "paint.defectScore", -0.025, 0.025),
                 0.0,
                 0.99,
             ),
             4,
         )
+        if original_defect_score < 0.4:
+            defect_score = min(0.39, defect_score)
+        elif original_defect_score < 0.6:
+            defect_score = min(0.59, max(0.4, defect_score))
+        else:
+            defect_score = max(0.6, defect_score)
         paint["defectScore"] = defect_score
-        paint["surfaceQualityScore"] = _round(max(0.0, 100.0 - defect_score * 32), 3)
-        paint["visionLabel"] = "DEFECT" if defect_score >= 0.45 else "NORMAL"
+
+        surface_quality_score = _jitter_numeric(
+            _as_float(paint.get("surfaceQualityScore")),
+            seed_key,
+            "paint.surfaceQualityScore",
+            pct=0.02,
+            absolute=1.5,
+            precision=3,
+            min_value=0.0,
+        )
+        original_surface_quality_score = _as_float(paint.get("surfaceQualityScore"))
+        if original_surface_quality_score >= 80.0:
+            surface_quality_score = max(80.0, surface_quality_score)
+        elif original_surface_quality_score >= 60.0:
+            surface_quality_score = min(79.9, max(60.0, surface_quality_score))
+        else:
+            surface_quality_score = min(59.9, surface_quality_score)
+        paint["surfaceQualityScore"] = _round(surface_quality_score, 3)
+        paint["visionLabel"] = "DEFECT" if defect_score >= 0.4 else "NORMAL"
 
     assembly = process_data.get("assembly")
     if isinstance(assembly, dict):

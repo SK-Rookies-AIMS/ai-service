@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class DefectTransferAnalysisService:
+    """불량 전이 예측 결과와 원인 분석을 ES 우선으로 조회한다."""
     def __init__(
         self,
         *,
@@ -99,6 +100,7 @@ class DefectTransferAnalysisService:
         return page
 
     def clear_cache(self) -> None:
+        """불량 전이 조회 캐시를 모두 삭제한다."""
         if not settings.redis_url:
             return
         try:
@@ -121,6 +123,9 @@ class DefectTransferAnalysisService:
         size: int,
         date: DateType | None = None,
     ) -> DefectTransferPredictionPage:
+        """불량 전이 목록을 ES 우선으로 조회하고, 실패 시 DB로 내려간다."""
+        """조회한 불량 전이 목록을 Redis 캐시에 저장한다."""
+        # ES를 먼저 보고, 실패하면 Redis 캐시와 DB 결과로 이어서 반환한다.
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
         cache_key = self._prediction_cache_key(
@@ -213,6 +218,9 @@ class DefectTransferAnalysisService:
         size: int,
         date: DateType | None = None,
     ) -> DefectTransferCausePage:
+        """대표 원인과 상세 원인을 함께 반환하는 불량 전이 원인 분석을 조회한다."""
+        """조회한 불량 전이 원인 분석을 Redis 캐시에 저장한다."""
+        # 원인 분석은 대표 원인과 상세 원인을 분리해서 화면에 맞게 구성한다.
         page = max(cursor or 0, 0)
         safe_size = max(1, min(size, 100))
         cache_key = self._cause_cache_key(
@@ -316,6 +324,8 @@ class DefectTransferAnalysisService:
         self,
         row: dict[str, Any],
     ) -> DefectTransferPredictionItem:
+        """DB row를 불량 전이 목록 응답 DTO로 변환한다."""
+        # 저장된 결과 row를 목록 카드용 DTO로 변환한다.
         return DefectTransferPredictionItem(
             vehicleId=str(row.get("vehicle_id")),
             carMasterId=int(row["car_master_id"]),
@@ -335,6 +345,7 @@ class DefectTransferAnalysisService:
 
     @staticmethod
     def _normalize_probability(value: Any) -> float:
+        # 99.24 또는 0.9924처럼 들어와도 화면에서는 동일한 확률로 맞춘다.
         if value is None:
             return 0.0
         normalized = float(value)
@@ -344,6 +355,7 @@ class DefectTransferAnalysisService:
 
     @classmethod
     def _result_probability(cls, row: dict[str, Any]) -> float:
+        # 현재 화면 기준 확률은 current -> defect -> target 순으로 확인한다.
         value = row.get("current_defect_probability")
         if value is None:
             value = row.get("defect_probability")
@@ -353,6 +365,7 @@ class DefectTransferAnalysisService:
 
     @classmethod
     def _resolve_predicted_defect_process(cls, row: dict[str, Any]) -> str | None:
+        # 목표 공정이 있으면 우선 사용하고, 없으면 다음 공정을 계산한다.
         if cls._result_probability(row) <= 0:
             return None
 
@@ -421,6 +434,8 @@ class DefectTransferAnalysisService:
         cls,
         row: dict[str, Any],
     ) -> tuple[DefectTransferCauseItem, list[DefectTransferCauseItem]]:
+        """대표 원인 1개와 상세 원인 리스트를 분리해 구성한다."""
+        # 대표 원인 1개와 보조 원인 리스트를 분리해 응답 구조를 만든다.
         main_causes = cls._normalize_main_causes(row.get("main_causes") or row.get("causes"))
         if main_causes:
             representative_cause = cls._to_cause_item(

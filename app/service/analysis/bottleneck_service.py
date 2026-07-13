@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class BottleneckAnalysisService:
+    """병목 분석 결과를 조회하고 필요 시 원천 이벤트를 다시 분석한다."""
     def __init__(
         self,
         *,
@@ -66,6 +67,8 @@ class BottleneckAnalysisService:
         size: int,
         date: DateType | None = None,
     ) -> BottleneckAnalysisPage:
+        """병목 결과를 ES 우선으로 읽고, 실패 시 캐시와 DB로 내려준다."""
+        # ES를 우선 조회하고, 실패하면 Redis와 DB 순으로 안전하게 내려간다.
         size = max(1, min(size, 100))
         page = max(cursor or 0, 0)
         cache_key = self._bottleneck_cache_key(
@@ -152,6 +155,7 @@ class BottleneckAnalysisService:
         size: int,
         date: DateType | None = None,
     ) -> BottleneckAnalysisPage:
+        """조회한 병목 결과를 Redis 캐시에 저장한 뒤 반환한다."""
         cache_key = self._bottleneck_cache_key(
             cursor=cursor,
             size=size,
@@ -166,6 +170,7 @@ class BottleneckAnalysisService:
         return page
 
     def run_analysis_and_save(self, *, cursor: int, size: int) -> tuple[int, bool]:
+        """원천 이벤트를 다시 분석해 병목 결과를 갱신한다."""
         merged_summaries = self.refresh_results_from_events()
         offset = cursor * size
         page_summaries = merged_summaries[offset : offset + size]
@@ -173,6 +178,8 @@ class BottleneckAnalysisService:
         return len(page_summaries), has_next
 
     def refresh_results_from_events(self) -> list[dict[str, Any]]:
+        """아직 분석되지 않은 원천 이벤트만 읽어 병목 순위를 재계산한다."""
+        # 아직 분석되지 않은 원천 이벤트를 다시 읽어서 병목 순위를 갱신한다.
         histories = self.repository.list_pending_manufacturing_event_histories()
         if not histories:
             return self._current_bottleneck_results()
@@ -290,6 +297,8 @@ class BottleneckAnalysisService:
         )
 
     def _get_date_options(self) -> list[AnalysisDateOption]:
+        """화면용 날짜 옵션을 detected_at 스냅샷 기준으로 만든다."""
+        # 화면의 날짜 선택 옵션은 detected_at 스냅샷 기준으로 구성한다.
         options = self.repository.list_date_options()
         return [
             AnalysisDateOption.model_validate(
@@ -303,6 +312,8 @@ class BottleneckAnalysisService:
         ]
 
     def _safe_get_date_options(self) -> list[AnalysisDateOption]:
+        """날짜 옵션 조회 실패 시 빈 목록으로 안전하게 처리한다."""
+        # 날짜 옵션 조회 실패로 전체 API가 깨지지 않도록 방어한다.
         try:
             return self._get_date_options()
         except Exception:
@@ -322,6 +333,7 @@ class BottleneckAnalysisService:
 
     @staticmethod
     def _analysis_detected_at(histories: list[dict[str, Any]]) -> datetime:
+        """분석된 이벤트 묶음의 기준 detected_at 시각을 계산한다."""
         candidates = [
             value.replace(tzinfo=None) if isinstance(value, datetime) and value.tzinfo else value
             for value in (row.get("event_time") for row in histories)
@@ -333,6 +345,7 @@ class BottleneckAnalysisService:
 
     @staticmethod
     def _create_search_repository() -> ProcessAnalysisSearchRepository | None:
+        """ES 설정이 있으면 검색 저장소를 만들고, 없으면 사용하지 않는다."""
         if not settings.elasticsearch_url:
             return None
         try:
@@ -347,6 +360,7 @@ class BottleneckAnalysisService:
     def _rank_bottleneck_summaries(
         summaries: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """병목 점수와 지연 시간을 기준으로 결과를 정렬한다."""
         ranked = sorted(
             summaries,
             key=lambda row: (
