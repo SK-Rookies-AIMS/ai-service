@@ -22,6 +22,7 @@ from app.repository.defect_transfer_prediction_repository import (
 )
 from app.repository.sampledb_schema import car_master
 from app.repository.sampledb_repository import SampleDbRepository
+from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.service.analysis.bottleneck_service import BottleneckAnalysisService
 from app.utils.datetime_utils import seoul_now_iso
 from app.websocket.analysis_manager import analysis_websocket_manager
@@ -111,6 +112,7 @@ def _run_raw_event_consumer(
         KafkaProducer,
         bootstrap_servers,
     )
+    analysis_search_repository = _create_analysis_search_repository()
     logger.info(
         "Raw Kafka consumer started: topic=%s group=%s concurrency=%s/%s bootstrap=%s auth=SASL_SSL/OAUTHBEARER",
         RAW_TOPIC,
@@ -131,6 +133,7 @@ def _run_raw_event_consumer(
                         defect_detector,
                         defect_result_repository,
                         analysis_producer,
+                        analysis_search_repository,
                         record,
                     )
                 except Exception:
@@ -174,6 +177,7 @@ def _consume_record(
     defect_detector: DefectTransferDetector | None,
     defect_result_repository: DefectTransferPredictionRepository | None,
     analysis_producer: Any | None,
+    analysis_search_repository: ProcessAnalysisSearchRepository | None,
     record: Any,
 ) -> None:
     """Kafka raw 메시지를 manufacturing_event_json row로 변환해 sampledb에 upsert한다."""
@@ -260,6 +264,7 @@ def _consume_record(
     )
     sync_published = _publish_process_analysis_sync_events(
         analysis_producer,
+        analysis_search_repository,
         repository,
         raw_event,
         row,
@@ -538,6 +543,21 @@ def _create_defect_transfer_result_repository() -> DefectTransferPredictionRepos
         return None
 
 
+def _create_analysis_search_repository() -> ProcessAnalysisSearchRepository | None:
+    if not settings.elasticsearch_url:
+        return None
+    try:
+        repository = ProcessAnalysisSearchRepository()
+        repository.ensure_indices()
+        return repository
+    except Exception:
+        logger.exception(
+            "Analysis search repository is unavailable. "
+            "Raw Kafka events will still be stored.",
+        )
+        return None
+
+
 def _create_analysis_producer(
     producer_cls: Any,
     bootstrap_servers: list[str],
@@ -648,6 +668,7 @@ def _publish_bottleneck_analysis_event(
 
 def _publish_process_analysis_sync_events(
     producer: Any | None,
+    search_repository: ProcessAnalysisSearchRepository | None,
     repository: SampleDbRepository,
     raw_event: dict[str, Any],
     row: dict[str, Any],
@@ -673,6 +694,7 @@ def _publish_process_analysis_sync_events(
                 value=bottleneck_event,
             ).get(timeout=10)
             published = True
+            _index_bottleneck_sync_event(search_repository, bottleneck_event)
         except Exception:
             logger.exception(
                 "Failed to publish bottleneck sync event: topic=%s event_id=%s",
@@ -694,6 +716,7 @@ def _publish_process_analysis_sync_events(
                 value=defect_event,
             ).get(timeout=10)
             published = True
+            _index_defect_sync_event(search_repository, defect_event)
         except Exception:
             logger.exception(
                 "Failed to publish defect transfer sync event: topic=%s event_id=%s",
@@ -702,6 +725,36 @@ def _publish_process_analysis_sync_events(
             )
 
     return published
+
+
+def _index_bottleneck_sync_event(
+    search_repository: ProcessAnalysisSearchRepository | None,
+    bottleneck_event: dict[str, Any],
+) -> None:
+    if search_repository is None:
+        return
+    try:
+        search_repository.index_sync_event(bottleneck_event)
+    except Exception:
+        logger.exception(
+            "Failed to index bottleneck sync event directly: event_id=%s",
+            bottleneck_event.get("eventId"),
+        )
+
+
+def _index_defect_sync_event(
+    search_repository: ProcessAnalysisSearchRepository | None,
+    defect_event: dict[str, Any],
+) -> None:
+    if search_repository is None:
+        return
+    try:
+        search_repository.index_sync_event(defect_event)
+    except Exception:
+        logger.exception(
+            "Failed to index defect transfer sync event directly: event_id=%s",
+            defect_event.get("eventId"),
+        )
 
 
 def _build_bottleneck_sync_event(
