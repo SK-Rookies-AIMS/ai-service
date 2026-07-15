@@ -45,8 +45,4 @@ def generate_manual(request: Request):
             "data": None
         }
 
-    return {
-        "success": True,
-        "message": "매뉴얼 생성 완료",
-        "data": result
-    }
+    return result
