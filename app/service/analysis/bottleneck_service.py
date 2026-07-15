@@ -299,7 +299,14 @@ class BottleneckAnalysisService:
     def _get_date_options(self) -> list[AnalysisDateOption]:
         """화면용 날짜 옵션을 detected_at 스냅샷 기준으로 만든다."""
         # 화면의 날짜 선택 옵션은 detected_at 스냅샷 기준으로 구성한다.
-        options = self.repository.list_date_options()
+        if self.search_repository is not None:
+            try:
+                options = self.search_repository.list_bottleneck_date_options()
+            except Exception:
+                logger.exception("Failed to load bottleneck date options from Elasticsearch.")
+                options = self.repository.list_date_options()
+        else:
+            options = self.repository.list_date_options()
         return [
             AnalysisDateOption.model_validate(
                 {

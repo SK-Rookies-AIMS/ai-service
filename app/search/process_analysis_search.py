@@ -232,6 +232,14 @@ class ProcessAnalysisSearchRepository:
         has_next = len(rows) > safe_size
         return rows[:safe_size], has_next
 
+    def list_bottleneck_date_options(self) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        return self._list_date_options(
+            index=settings.elasticsearch_bottleneck_index,
+            date_field="detectedAt",
+        )
+
     def count_bottleneck_page(self) -> int:
         latest_snapshot_id = self._latest_bottleneck_snapshot_id()
         if not latest_snapshot_id:
@@ -289,6 +297,22 @@ class ProcessAnalysisSearchRepository:
         ]
         has_next = len(rows) > safe_size
         return rows[:safe_size], has_next
+
+    def list_defect_transfer_date_options(
+        self,
+        *,
+        vehicle_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        query: dict[str, Any] = {"match_all": {}}
+        if vehicle_id:
+            query = {"term": {"vehicleId": vehicle_id}}
+        return self._list_date_options(
+            index=settings.elasticsearch_defect_transfer_index,
+            date_field="predictedAt",
+            query=query,
+        )
 
     def get_latest_defect_cause_document(
         self,
@@ -365,6 +389,57 @@ class ProcessAnalysisSearchRepository:
                 },
             },
         }
+
+    def _list_date_options(
+        self,
+        *,
+        index: str,
+        date_field: str,
+        query: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {
+            "size": 0,
+            "track_total_hits": False,
+            "query": query or {"match_all": {}},
+            "aggs": {
+                "by_date": {
+                    "date_histogram": {
+                        "field": date_field,
+                        "calendar_interval": "day",
+                        "time_zone": "+09:00",
+                        "order": {"_key": "desc"},
+                        "min_doc_count": 1,
+                    },
+                    "aggs": {
+                        "sample_doc": {
+                            "top_hits": {
+                                "size": 1,
+                                "_source": ["eventId"],
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        response = self.client.search(index=index, body=body)
+        buckets = response.get("aggregations", {}).get("by_date", {}).get("buckets", [])
+        options: list[dict[str, Any]] = []
+        for bucket in buckets:
+            date_value = bucket.get("key_as_string")
+            if not date_value:
+                continue
+            sample_event_id = None
+            sample_hits = bucket.get("sample_doc", {}).get("hits", {}).get("hits", [])
+            if sample_hits:
+                sample_source = sample_hits[0].get("_source") or {}
+                sample_event_id = sample_source.get("eventId")
+            options.append(
+                {
+                    "date": str(date_value)[:10],
+                    "sample_event_id": sample_event_id,
+                },
+            )
+        return options
 
     def _bulk_index(self, actions: list[dict[str, Any]]) -> None:
         if not actions:
