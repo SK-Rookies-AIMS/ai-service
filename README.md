@@ -15,7 +15,7 @@
 - Kafka로 입력과 분석을 분리하고, Elasticsearch로 조회 성능을 확보합니다.
 
 
-## ✨ 핵심 기능
+## ✨ 주요 기능
 
 ### 1. 불량 탐지 및 전이 예측
 
@@ -303,23 +303,6 @@ sequenceDiagram
     end
 ```
 
-## ⚙️ 실행
-
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-주요 주소:
-
-- API Root: `http://127.0.0.1:8000/`
-- Health: `http://127.0.0.1:8000/api/health`
-- Swagger: `http://127.0.0.1:8000/docs`
-
-
-
 ## 🔧 기술 스택
 ![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
@@ -334,3 +317,18 @@ uvicorn app.main:app --reload
 ![LightGBM](https://img.shields.io/badge/LightGBM-00A86B?style=for-the-badge&logo=lightgbm&logoColor=white)
 ![SHAP](https://img.shields.io/badge/SHAP-4B5563?style=for-the-badge&logo=shap&logoColor=white)
 ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white)
+
+## ⚙️ 실행
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+주요 주소:
+
+- API Root: `http://127.0.0.1:8000/`
+- Health: `http://127.0.0.1:8000/api/health`
+- Swagger: `http://127.0.0.1:8000/docs`
