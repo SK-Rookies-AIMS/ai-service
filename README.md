@@ -213,27 +213,6 @@ flowchart TD
 
 
 &nbsp;
-## 📡 API 요약
-
-### 분석 조회
-
-- `GET /api/ai/process/bottleneck`
-- `GET /api/ai/process/defect-transfer/predictions`
-- `GET /api/ai/process/defect-transfer/causes`
-
-### 관리 API
-
-- `POST /api/ai/admin/analysis/backfill/bottleneck`
-- `POST /api/ai/admin/analysis/backfill/defect-transfer`
-- `POST /api/ai/admin/analysis/reindex/bottleneck`
-- `POST /api/ai/admin/analysis/reindex/defect-transfer`
-
-### AI 메뉴얼
-
-- `GET /api/ai/manual`
-
-
-&nbsp;
 ## 🛠 전체 데이터 기능 흐름
 <img width="10217" height="5316" alt="데이터 기능 흐름도" src="https://github.com/user-attachments/assets/02488ac3-03af-4d68-ae0a-96fbdced0e4a" />
 
@@ -309,6 +288,27 @@ app/
 - `app/kafka`: 제조 이벤트 수집과 분석 결과 동기화를 담당합니다.
 - `app/ml`: 병목 탐지와 불량 전이 모델을 담당합니다.
 - `app/ai_manual`: 메뉴얼 생성 로직을 담당합니다.
+
+&nbsp;
+## 📡 API 요약
+
+### 분석 조회
+
+- `GET /api/ai/process/bottleneck`
+- `GET /api/ai/process/defect-transfer/predictions`
+- `GET /api/ai/process/defect-transfer/causes`
+
+### 관리 API
+
+- `POST /api/ai/admin/analysis/backfill/bottleneck`
+- `POST /api/ai/admin/analysis/backfill/defect-transfer`
+- `POST /api/ai/admin/analysis/reindex/bottleneck`
+- `POST /api/ai/admin/analysis/reindex/defect-transfer`
+
+### AI 메뉴얼
+
+- `GET /api/ai/manual`
+
 
 &nbsp;
 ## 🔧 기술 스택
