@@ -632,7 +632,16 @@ class DefectTransferAnalysisService:
         *,
         vehicle_id: str | None = None,
     ) -> list[AnalysisDateOption]:
-        options = self.repository.list_date_options(vehicle_id=vehicle_id)
+        if self.search_repository is not None:
+            try:
+                options = self.search_repository.list_defect_transfer_date_options(
+                    vehicle_id=vehicle_id,
+                )
+            except Exception:
+                logger.exception("Failed to load defect transfer date options from Elasticsearch.")
+                options = self.repository.list_date_options(vehicle_id=vehicle_id)
+        else:
+            options = self.repository.list_date_options(vehicle_id=vehicle_id)
         return [
             AnalysisDateOption.model_validate(
                 {
