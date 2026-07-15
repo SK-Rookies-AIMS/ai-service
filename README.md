@@ -14,7 +14,7 @@
 - 운영자가 바로 읽을 수 있는 AI 메뉴얼을 생성합니다.
 - Kafka로 입력과 분석을 분리하고, Elasticsearch로 조회 성능을 확보합니다.
 
-
+&nbsp;
 ## ✨ 주요 기능
 
 ### 1. 불량 탐지 및 전이 예측
@@ -86,6 +86,8 @@
 2. SHAP 기반 원인을 정리합니다.
 3. 대표 원인과 상세 원인을 나눠 반환합니다.
 
+
+&nbsp;
 ### 2. 병목 분석
 
 <img width="868" height="556" alt="다운로드 (1)" src="https://github.com/user-attachments/assets/0f681bf1-4859-4ecc-abe3-c193a68efa81" />
@@ -133,6 +135,7 @@
 4. 결과를 DB와 ES에 저장합니다.
 5. ES의 `detectedAt`을 기준으로 날짜 옵션과 목록을 만듭니다.
 
+&nbsp;
 ### 3. 🤖 AI 메뉴얼
 | 이상 이벤트 발생 | 주니어 | 시니어 |
 |---|---|---|
@@ -163,6 +166,7 @@
 5. LLM이 역할별 메뉴얼을 생성합니다.
 6. 운영자 조치 가이드로 반환합니다.
 
+&nbsp;
 ## 🔄 Kafka / Elasticsearch 아키텍처 상세
 
 ### Kafka 기반 비동기 데이터 파이프라인
@@ -208,6 +212,7 @@ flowchart TD
 | Defect Transfer Index | `settings.elasticsearch_defect_transfer_index` | 불량 전이 / 원인 검색 |
 
 
+&nbsp;
 ## 📡 API 요약
 
 ### 분석 조회
@@ -228,39 +233,7 @@ flowchart TD
 - `GET /api/ai/manual`
 
 
-## 🏗️ 프로젝트 구조
-
-```text
-app/
-├─ api/                     # FastAPI router 계층
-│  ├─ routers/
-│  │  ├─ process.py         # 병목 / 불량 전이 조회
-│  │  ├─ defect_transfer.py # 불량 전이 / 원인 조회
-│  │  ├─ analysis_maintenance.py # 병목 / 불량 전이 백필·재색인
-│  │  ├─ manual.py          # AI 메뉴얼
-│  │  └─ health.py          # 헬스 체크
-├─ service/
-│  ├─ analysis/             # 분석 조회 / 백필 / 재색인
-│  ├─ manufacturing/        # 제조 이벤트 처리
-│  └─ llm/                  # LLM 연동
-├─ repository/              # DB 접근 계층
-├─ search/                  # Elasticsearch 저장 / 조회
-├─ kafka/                   # Kafka 소비 / 발행
-├─ ml/                      # 모델 학습 / 추론 / SHAP
-├─ ai_manual/               # AI 메뉴얼 생성
-├─ dto/                     # 요청 / 응답 스키마
-├─ batch/                   # 배치 / 백필 작업
-└─ scheduler/               # 주기 실행 작업
-```
-
-### 역할 요약
-
-- `app/service/analysis`: 분석 결과 조회와 관리 작업을 담당합니다.
-- `app/search`: Elasticsearch 인덱싱과 조회를 담당합니다.
-- `app/kafka`: 제조 이벤트 수집과 분석 결과 동기화를 담당합니다.
-- `app/ml`: 병목 탐지와 불량 전이 모델을 담당합니다.
-- `app/ai_manual`: 메뉴얼 생성 로직을 담당합니다.
-
+&nbsp;
 ## 🛠 전체 데이터 기능 흐름
 <img width="10217" height="5316" alt="데이터 기능 흐름도" src="https://github.com/user-attachments/assets/02488ac3-03af-4d68-ae0a-96fbdced0e4a" />
 
@@ -303,6 +276,41 @@ sequenceDiagram
     end
 ```
 
+&nbsp;
+## 🏗️ 프로젝트 구조
+
+```text
+app/
+├─ api/                     # FastAPI router 계층
+│  ├─ routers/
+│  │  ├─ process.py         # 병목 / 불량 전이 조회
+│  │  ├─ defect_transfer.py # 불량 전이 / 원인 조회
+│  │  ├─ analysis_maintenance.py # 병목 / 불량 전이 백필·재색인
+│  │  ├─ manual.py          # AI 메뉴얼
+│  │  └─ health.py          # 헬스 체크
+├─ service/
+│  ├─ analysis/             # 분석 조회 / 백필 / 재색인
+│  ├─ manufacturing/        # 제조 이벤트 처리
+│  └─ llm/                  # LLM 연동
+├─ repository/              # DB 접근 계층
+├─ search/                  # Elasticsearch 저장 / 조회
+├─ kafka/                   # Kafka 소비 / 발행
+├─ ml/                      # 모델 학습 / 추론 / SHAP
+├─ ai_manual/               # AI 메뉴얼 생성
+├─ dto/                     # 요청 / 응답 스키마
+├─ batch/                   # 배치 / 백필 작업
+└─ scheduler/               # 주기 실행 작업
+```
+
+### 역할 요약
+
+- `app/service/analysis`: 분석 결과 조회와 관리 작업을 담당합니다.
+- `app/search`: Elasticsearch 인덱싱과 조회를 담당합니다.
+- `app/kafka`: 제조 이벤트 수집과 분석 결과 동기화를 담당합니다.
+- `app/ml`: 병목 탐지와 불량 전이 모델을 담당합니다.
+- `app/ai_manual`: 메뉴얼 생성 로직을 담당합니다.
+
+&nbsp;
 ## 🔧 기술 스택
 ![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
@@ -318,6 +326,8 @@ sequenceDiagram
 ![SHAP](https://img.shields.io/badge/SHAP-4B5563?style=for-the-badge&logo=shap&logoColor=white)
 ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white)
 
+
+&nbsp;
 ## ⚙️ 실행
 
 ```powershell
