@@ -1,52 +1,31 @@
-# AI Service
+# AIMS - AI Service
 
-**서비스명: AIMS (Auto Intelligence Manufacturing System)**
+### AIMS (Auto Intelligence Manufacturing System) - AI 기반 자동차 스마트팩토리 관제 시스템
 
-AIMS는 자동차 스마트팩토리의 제조 데이터를 중심으로 병목 분석, 불량 전이 예측, SHAP 기반 원인 분석, AI 메뉴얼 생성을 제공하는
-AI 기반 제조 관제 시스템입니다.
+`ai-service`는 SK 쉴더스 루키즈 개발 5기 **AI 기반 자동차 스마트팩토리 관제 시스템 AIMS**에서 발생하는 제조 이벤트를 기반으로 병목 분석, 불량 전이 예측, SHAP 기반 원인 분석, AI 메뉴얼 생성을 제공하는 FastAPI 기반 AI 서비스입니다.
 
-이 서비스는 단순히 결과를 조회하는 API가 아니라, 제조 이벤트를 수집하고 분석한 뒤
-결과를 DB와 Elasticsearch에 함께 저장하고, 운영 중 데이터가 어긋나면 다시 맞추는 백엔드 역할까지 담당합니다.
+제조 이벤트를 수집하고 분석 결과를 DB와 Elasticsearch에 함께 반영한 뒤, 운영 화면이 빠르게 최신 상태를 볼 수 있도록 돕는 역할을 합니다.
 
-핵심적으로 AIMS가 하는 일은 다음과 같습니다.
+핵심적으로는 다음을 수행합니다.
 
-- 생산 공정에서 어느 구간이 병목인지 계산합니다.
-- 어떤 차량이 다음 공정으로 불량이 전이될 가능성이 높은지 예측합니다.
-- 예측 결과의 근거를 SHAP 기반으로 설명합니다.
-- 사용자 요청에 따라 AI 메뉴얼을 생성합니다.
-- Kafka로 들어오는 제조 이벤트를 받아 분석 파이프라인에 연결합니다.
-- Elasticsearch를 조회용 검색 인덱스로 사용하고, 필요 시 다시 재색인합니다.
+- 공정별 병목을 계산합니다.
+- 어떤 차량이 다음 공정에서 불량으로 이어질 가능성이 있는지 예측합니다.
+- SHAP으로 불량 전이 원인을 설명합니다.
+- 운영자가 바로 읽을 수 있는 AI 메뉴얼을 생성합니다.
+- Kafka로 입력과 분석을 분리하고, Elasticsearch로 조회 성능을 확보합니다.
 
----
 
-## 핵심 기능
+## ✨ 핵심 기능
 
-### 1. 병목 분석
+### 1. 불량 탐지 및 전이 예측
 
-- `sampledb.manufacturing_event_json`의 제조 이벤트를 읽어 공정별 병목을 계산합니다.
-- 결과는 공정 순위, 지연 시간, 영향 차량 수, 위험도 형태로 정리됩니다.
-- 결과는 `bottleneck_analysis_result`에 저장됩니다.
-- 조회 시에는 ES의 `detectedAt` 날짜를 기준으로 날짜 옵션을 만듭니다.
-- Elasticsearch가 살아 있으면 ES 우선으로 조회하고, 실패하면 DB에서 동일한 결과를 다시 읽습니다.
-- 같은 날짜 구간을 다시 계산하는 백필 / 재색인 기능도 함께 제공합니다.
+<img width="984" height="1263" alt="혼합불량" src="https://github.com/user-attachments/assets/386bac8e-5f96-4dbe-a413-1cdc48c0ef93" />
 
-#### 구현 로직
-
-1. `BottleneckAnalysisService.get_realtime_bottlenecks()`가 먼저 날짜 옵션을 읽고, 요청 날짜가 없으면 최신 날짜를 선택합니다.
-2. `ProcessAnalysisSearchRepository.list_bottleneck_date_options()`가 ES의 `detectedAt` 날짜를 집계해 날짜 옵션을 만듭니다.
-3. `BottleneckAnalysisService`는 ES에서 `list_bottleneck_page()`를 먼저 호출해 최신 병목 row를 가져옵니다.
-4. ES 조회가 실패하면 Redis 캐시를 확인하고, 캐시도 없으면 DB 조회로 fallback합니다.
-5. 백필이나 재색인이 실행되면 해당 날짜의 기존 결과를 지우고 다시 계산해서 저장합니다.
-6. 따라서 병목 화면은 최신 분석 결과를 기본으로 보여주되, 날짜 선택 시 과거 분석도 다시 볼 수 있습니다.
-
-### 2. 불량 전이 예측
-
-- 차량 단위로 불량이 다음 공정으로 전이될 가능성을 예측합니다.
-- 현재 공정, 예측 공정, 전이 확률, 예상 발생 시점, 위험도를 함께 계산합니다.
+- 차량 단위로 다음 공정 불량 가능성을 예측하고 전이 경로를 함께 봅니다.
+- 현재 공정, 다음 공정, 설비 신호, 사이클 타임, 대기 시간, 재공 수량, 진동/온도/도막 두께를 함께 봅니다.
 - 결과는 `defect_transfer_prediction_result`에 저장됩니다.
 - 조회 시에는 ES의 `predictedAt` 날짜를 기준으로 날짜 옵션을 만듭니다.
-- 목록 조회는 차량별 최신 1건만 보여줘서, 차량의 현재 상태를 빠르게 확인할 수 있습니다.
-- 같은 결과 테이블을 원인 분석에도 사용합니다.
+- 목록은 차량별 최신 1건을 보여줍니다.
 
 #### 구현 로직
 
@@ -54,93 +33,168 @@ AI 기반 제조 관제 시스템입니다.
 2. `ProcessAnalysisSearchRepository.list_defect_transfer_date_options()`가 ES의 `predictedAt` 날짜를 집계합니다.
 3. ES가 가능하면 `list_defect_prediction_page()`에서 차량별 최신 1건을 가져옵니다.
 4. ES가 실패하면 Redis 캐시를 먼저 보고, 없으면 DB의 `list_prediction_page()`로 fallback합니다.
-5. 저장 단계에서는 각 제조 이벤트마다 모델 예측을 수행한 뒤 `replace_prediction_result()`로 결과를 저장합니다.
-6. 저장할 때는 같은 `manufacturing_event_id`가 있으면 기존 row를 지우고 새 row를 넣어서 이벤트 기준 중복을 막습니다.
-7. 재색인 시에는 해당 날짜의 문서를 ES에서 먼저 삭제한 뒤, 소스 이벤트를 다시 예측해서 넣습니다.
+5. 저장 단계에서 같은 이벤트가 다시 들어오면 기존 row를 덮어써 중복 예측을 줄입니다.
+6. 재색인 시 해당 날짜의 문서를 다시 읽어 ES에 최신 상태를 맞춥니다.
 
-### 3. SHAP 기반 원인 분석
+#### ML 모델링
 
-- 특정 차량의 최신 불량 전이 결과를 기준으로 원인을 설명합니다.
-- 대표 원인 1개와 상세 원인 목록을 분리해 반환합니다.
-- 각 원인은 영향도, 레이블, 설명 메시지를 함께 포함합니다.
-- 불량 전이 예측과 같은 ES 날짜 옵션을 사용해 같은 시점의 데이터를 일관되게 조회합니다.
+- `ColumnTransformer`로 수치형과 범주형 feature를 분리 처리합니다.
+- 범주형은 `OneHotEncoder`로 변환하고, 희귀 범주는 `min_frequency`를 활용해 묶습니다.
+- 후보 모델은 `LightGBM`, `XGBoost`, `CatBoost`, `Logistic Regression` 계열을 비교합니다.
+- 평가 지표는 `accuracy`, `precision`, `recall`, `f1`, `PR-AUC`, `ROC-AUC`를 함께 봅니다.
+- 최종 결과는 차량별 `predictedDefectProcess`, `transferProbability`, `riskLevel` 형태로 내려갑니다.
+- SHAP으로 주요 원인을 계산하고, API에서는 `main_causes`, `detailCauses`로 제공합니다.
+- 예측 결과는 Kafka 분석 이벤트로 이어져 ES와 화면이 동기화됩니다.
+
+불량 예측 및 전이 예측에서 함께 보는 맥락은 아래와 같습니다.
+
+- 현재 공정
+- 다음 공정으로의 전이 가능성
+- 설비 신호
+- 사이클 타임
+- 대기 시간
+- 재공 수량
+- 진동, 온도, 도막 두께 같은 공정 특성
+
+즉, 차량 단위 예측이지만 실제 판단은 제조 이벤트 feature 전체를 보는 구조입니다.
+
+#### 흐름
+
+1. `sampledb.manufacturing_event_json`에서 SENT 이벤트를 읽습니다.
+2. 모델이 차량별 전이 확률을 계산합니다.
+3. 예측 결과를 DB와 ES에 저장합니다.
+4. ES의 `predictedAt`을 기준으로 최신 1건을 보여줍니다.
+
+#### SHAP 원인 분석
+<img width="884" height="684" alt="main 원인" src="https://github.com/user-attachments/assets/2165f137-0bee-4cb5-a5d1-d1ea7373e464" />
+
+- 원인 분석은 불량 탐지 및 전이 예측 결과를 해석하는 단계입니다.
+- SHAP 값을 이용해 주요 원인 1개와 상세 원인 여러 개를 분리합니다.
+- `main_causes`는 대표 원인, `detailCauses`는 보조 원인입니다.
+
+##### 구현 로직
+
+1. `DefectTransferAnalysisService.get_cause_analysis()`가 차량 ID와 날짜 옵션을 기준으로 조회 대상을 결정합니다.
+2. ES가 있으면 `get_latest_defect_cause_document()`에서 차량별 최신 문서를 가져옵니다.
+3. 조회된 문서의 대표 원인과 상세 원인을 분리합니다.
+4. 대표 원인은 화면의 summary 영역으로, 상세 원인은 리스트 형태로 보여줍니다.
+5. 차량 ID가 없으면 최신 차량 기준으로 조회할 수 있습니다.
+
+##### 흐름
+
+1. 최신 불량 탐지 및 전이 예측 문서를 찾습니다.
+2. SHAP 기반 원인을 정리합니다.
+3. 대표 원인과 상세 원인을 나눠 반환합니다.
+
+### 2. 병목 분석
+
+<img width="868" height="556" alt="다운로드 (1)" src="https://github.com/user-attachments/assets/0f681bf1-4859-4ecc-abe3-c193a68efa81" />
+
+- `sampledb.manufacturing_event_json`의 제조 이벤트를 읽어 공정별 병목을 계산합니다.
+- 결과는 공정 순위, 지연 시간, 영향 차량 수, 위험도 형태로 정리됩니다.
+- 결과는 `bottleneck_analysis_result`에 저장됩니다.
+- 조회 시에는 ES의 `detectedAt` 날짜를 기준으로 날짜 옵션을 만듭니다.
+- Elasticsearch가 살아 있으면 ES 우선으로 조회하고, 실패하면 DB와 Redis에서 다시 읽습니다.
+- 같은 날짜 구간을 다시 계산하는 백필 / 재색인 기능도 함께 제공합니다.
 
 #### 구현 로직
 
-1. `DefectTransferAnalysisService.get_cause_analysis()`가 차량 ID와 날짜 옵션을 기준으로 조회 대상을 결정합니다.
-2. ES가 있으면 `get_latest_defect_cause_document()`가 차량별 최신 문서를 하나 가져옵니다.
-3. 조회된 문서는 대표 원인과 상세 원인으로 분리됩니다.
-4. 대표 원인은 화면의 summary 영역에 쓰고, 상세 원인은 리스트 형태로 보여줍니다.
-5. 차량 ID가 없으면 최신 차량 기준으로 조회할 수 있습니다.
+1. `BottleneckAnalysisService.get_realtime_bottlenecks()`가 날짜 옵션을 읽고, 요청 날짜가 없으면 최신 날짜를 선택합니다.
+2. `ProcessAnalysisSearchRepository.list_bottleneck_date_options()`가 ES의 `detectedAt` 날짜를 집계해 날짜 옵션을 만듭니다.
+3. `BottleneckAnalysisService`는 ES에서 `list_bottleneck_page()`를 먼저 호출해 최신 병목 row를 가져옵니다.
+4. ES 조회가 실패하면 Redis 캐시를 확인하고, 캐시도 없으면 DB 조회로 fallback합니다.
+5. 백필이나 재색인이 실행되면 해당 날짜의 기존 결과를 지우고 다시 계산해서 저장합니다.
+6. 따라서 병목 화면은 최신 분석 결과를 기본으로 보여주되, 날짜 선택 시 과거 분석도 다시 볼 수 있습니다.
 
-### 4. AI 메뉴얼
+#### 모델링
 
-- JWT를 읽어서 로그인한 사용자 기준의 AI 메뉴얼을 생성합니다.
-- `Authorization: Bearer ...` 헤더가 필요합니다.
-- 메뉴얼 생성은 `app/ai_manual` 아래에서 별도로 관리합니다.
-- 일반 분석 API와 분리된 독립 기능이라, 운영 정책이나 권한 조건을 따로 둘 수 있습니다.
+- 기본 모델은 `IsolationForest`입니다.
+- 연속형 공정 지표는 `StandardScaler`로 정규화한 뒤 학습합니다.
+- 공정별 지연 특성을 반영한 규칙 기반 feature를 함께 사용합니다.
+- `bottleneck_station`처럼 병목이 발생한 공정을 설명 가능한 형태로 정리합니다.
+- 결과는 공정 단위로 집계하고, station 요약과 KPI 요약도 함께 생성합니다.
+- SHAP은 `IsolationForest`의 `decision_function`이 어떤 feature에 반응했는지를 설명하는 용도로 사용됩니다.
+
+병목에서 보는 핵심 feature는 아래와 같습니다.
+
+- 공정 체류 시간
+- 최대 station span
+- 활성 공정 수
+- rule risk score
+- iforest risk score
+
+병목은 단일 점수만 보는 게 아니라, `어느 공정이 막혔는지`와 `왜 그렇게 판단했는지`를 같이 보여주는 구조입니다.
+
+#### 흐름
+
+1. `sampledb.manufacturing_event_json`에서 제조 이벤트를 읽습니다.
+2. 공정별 지연 feature를 계산합니다.
+3. `IsolationForest`와 규칙 기반 점수로 병목 순위를 산출합니다.
+4. 결과를 DB와 ES에 저장합니다.
+5. ES의 `detectedAt`을 기준으로 날짜 옵션과 목록을 만듭니다.
+
+### 3. 🤖 AI 메뉴얼
+| 이상 이벤트 발생 | 주니어 | 시니어 |
+|---|---|---|
+| <img width="582" height="506" alt="이상 이벤트 발생" src="https://github.com/user-attachments/assets/faac7e24-4756-4ee7-be91-bf9e813e6a2c" /> | <img width="582" height="506" alt="주니어" src="https://github.com/user-attachments/assets/9e0900e0-50ef-4b2f-aafd-7d18428d8a58" /> | <img width="565" height="500" alt="시니어" src="https://github.com/user-attachments/assets/6122f166-a6af-4e34-9474-0b7ba454f977" /> |
+
+- JWT 인증을 통과한 사용자만 메뉴얼을 생성합니다.
+- 이벤트, 설비 맥락, 사내 지침, 검색된 문서를 함께 사용합니다.
+- 메뉴얼은 현장 조치용 설명서로 반환됩니다.
+- 사용자는 `Junior` / `Senior`로 구분되며, `Junior`는 실행 절차 중심, `Senior`는 원인·판단 근거와 운영 관점까지 포함한 메뉴얼을 받습니다.
 
 #### 구현 로직
 
 1. `ManualService.generate_manual(user_id)`가 요청의 시작점입니다.
-2. 가장 위험도가 높은 알림 이벤트를 `AlertEventRepository`에서 먼저 가져옵니다.
-3. 사용자 ID로 사용자 등급을 읽고, 없으면 `Junior`로 기본 처리합니다.
-4. `CriticalEvent`, `OperatorInfo`, `FactoryContext`, `RagContext`를 묶어서 LLM 입력용 요청 객체를 만듭니다.
+2. 현재 위험도가 높은 알람 이벤트를 `AlertEventRepository`에서 먼저 가져옵니다.
+3. 사용자의 ID로 사용자의 권한을 읽고, 없으면 `Junior`로 기본 처리합니다.
+4. `CriticalEvent`, `OperatorInfo`, `FactoryContext`, `RagContext`를 묶어 LLM 입력 객체를 만듭니다.
 5. `VectorStore.search()`로 관련 문서를 검색해 RAG 컨텍스트를 구성합니다.
-6. `manual_prompt`에 컨텍스트를 넣고 `ChatOpenAI`로 응답을 생성합니다.
-7. 최종적으로 이벤트 정보와 생성된 메뉴얼을 함께 반환합니다.
+6. 권한이 `Junior`면 즉시 수행할 점검 항목과 순서를 강조하고, `Senior`면 원인 해석과 판단 근거를 더 자세히 포함하도록 프롬프트를 구성합니다.
+7. `manual_prompt`에 컨텍스트를 넣고 `ChatOpenAI`로 응답을 생성합니다.
+8. 최종적으로 이벤트 정보와 권한별로 다른 깊이의 메뉴얼을 함께 반환합니다.
 
-### 5. 관리 기능
+#### 흐름
 
-- 병목 백필 / 재색인
-- 불량 전이 백필 / 재색인
-- 날짜 단위 결과 삭제 후 재생성
-- DB와 Elasticsearch 정합성 재구성
+1. JWT와 권한을 확인합니다.
+2. 현재 알람과 관련 이벤트를 가져옵니다.
+3. 운영 문서를 검색해 RAG 컨텍스트를 구성합니다.
+4. 권한에 따라 프롬프트의 상세 수준을 다르게 구성합니다.
+5. LLM이 역할별 메뉴얼을 생성합니다.
+6. 운영자 조치 가이드로 반환합니다.
 
----
-
-## Kafka / Elasticsearch 아키텍처 상세
+## 🔄 Kafka / Elasticsearch 아키텍처 상세
 
 ### Kafka 기반 비동기 데이터 파이프라인
 
-Kafka는 AIMS 아키텍처에서 제조 데이터의 실시간 수집 및 분석 파이프라인의 핵심 백본(Backbone) 역할을 수행합니다.
-
-- **원천 데이터 수집 (Raw Topic)**:
-  - `factory.manufacturing.raw` 토픽은 제조 현장(MES, PLC 등)으로부터 발생하는 모든 원천 제조 이벤트를 수집하는 진입점입니다.
-  - 이벤트 스트림의 처리 순서 보장과 분산 처리를 위해 `vehicle_id` 또는 `equipment_id`를 파티션 키(Partition Key)로 활용할 수 있는 다중 파티션 구조를 가집니다.
-  - `ai-analysis-consumer-group` 컨슈머 그룹에 속한 `app/kafka/raw_event_consumer.py`가 메시지를 소비하여 `sampledb.manufacturing_event_json`에 원천 데이터를 영구 저장합니다.
-
-- **분석 결과 발행 및 동기화 (Analysis Topic)**:
-  - 원천 이벤트를 기반으로 병목 분석 및 불량 전이 추론(AI 모델 수행)이 완료되면, 그 결과 데이터는 `factory.manufacturing.analysis` 토픽으로 발행(Publish)됩니다.
-  - 발행된 분석 결과는 `ai-analysis-sync-consumer-group`에 속한 `analysis_sync_consumer`가 비동기적으로 소비하여 Elasticsearch에 동기화(Indexing)합니다.
-  - 이를 통해 무거운 **AI 모델 추론**과 I/O 바운드 작업인 **검색엔진 색인**을 완전히 디커플링(Decoupling)하여, 시스템의 안정성과 확장성을 극대화합니다.
+- Kafka raw topic(`factory.manufacturing.raw`)은 외부 제조 시스템의 원천 이벤트 진입점입니다.
+- `raw_event_consumer`는 raw topic을 읽어 `sampledb.manufacturing_event_json`에 저장합니다.
+- 분석 대상 이벤트는 병목 / 불량 전이 추론을 수행하고, 결과를 `factory.manufacturing.analysis` topic으로 발행합니다.
+- `analysis_sync_consumer`는 `factory.manufacturing.analysis` topic을 다시 받아 Elasticsearch에 색인합니다.
 
 ### Elasticsearch 기반 실시간 검색 및 집계
 
-Elasticsearch는 대용량 AI 분석 결과를 지연 없이 빠르게 조회하고, 다차원 집계(Aggregation)를 수행하기 위한 메인 검색 및 분석 엔진입니다.
-
-- **인덱스 설계 및 전략 (Index Strategy)**:
-  - **병목 인덱스** (`settings.elasticsearch_bottleneck_index`, 기본값 `ai-bottleneck-result-v1` 계열): 공정별 지연 상태, 위험도 데이터를 저장합니다. `detectedAt` 필드를 기준으로 시계열로 관리됩니다.
-  - **불량 전이 인덱스** (`settings.elasticsearch_defect_transfer_index`, 기본값 `ai-defect-transfer-result-v1` 계열): 차량별 불량 전이 확률, 발생 시점, SHAP 원인 분석 데이터를 저장합니다. `predictedAt` 필드를 기준으로 관리됩니다.
-  - 시계열 데이터의 특성을 살려 인덱스 롤오버(Rollover) 및 ILM(Index Lifecycle Management) 정책을 적용하기 용이한 구조를 취합니다.
-
-- **특화된 검색 및 집계 쿼리 활용 (Advanced Query)**:
-  - **차량별 최신 상태 추출 (`collapse`)**: 동일 차량에 대해 공정 진행에 따라 여러 분석 결과가 누적될 수 있습니다. 응답 속도 최적화를 위해 ES의 `collapse` 파라미터를 사용하여 최신 타임스탬프(`predictedAt`) 기준 1건의 문서만 빠르게 추출합니다.
-  - **날짜별 동적 옵션 생성 (`date_histogram`)**: 화면에서 제공되는 '분석 날짜 옵션'은 ES의 `date_histogram` 집계(Aggregation)를 활용해, 실제 분석 데이터가 존재하는 날짜 리스트만 빠르고 정확하게 동적 생성하여 제공합니다.
-
-- **장애 대응 및 정합성 보장 (Fallback & Reindex)**:
-  - **고가용성**: ES 클러스터에 일시적 장애가 발생해도 서비스는 중단되지 않습니다. 조회 API는 ES 실패를 감지하면 자동으로 Redis 캐시와 DB 폴백(Fallback) 조회를 수행합니다.
-  - **데이터 재구성**: 백필(Backfill)이나 재색인(Reindex) 요청 시, 대상 날짜의 기존 ES 문서를 일괄 삭제(Delete By Query)하고 소스 이벤트로부터 다시 계산/색인하여 DB와 ES 간의 데이터 정합성을 일관되게 맞춥니다.
+- Elasticsearch는 분석 결과를 빠르게 조회하기 위한 검색 인덱스입니다.
+- 병목 인덱스는 `detectedAt` 기준으로 날짜 옵션과 목록 조회에 사용됩니다.
+- 불량 전이 인덱스는 `predictedAt` 기준으로 날짜 옵션, 목록 조회, 원인 조회에 사용됩니다.
+- 조회 API는 ES 우선으로 응답하고, ES가 실패하면 DB/Redis로 fallback합니다.
+- ES에서는 날짜 집계를 `date_histogram`으로 처리하고, 차량별 최신 결과는 대표 문서 1건만 보여줍니다.
 
 ### Kafka -> ES 색인 흐름
 
-1. raw topic의 제조 이벤트가 `raw_event_consumer`로 들어옵니다.
-2. 원천 이벤트가 `manufacturing_event_json`에 저장됩니다.
-3. 병목 / 불량 전이 분석이 수행됩니다.
-4. 분석 결과가 `factory.manufacturing.analysis` topic으로 발행됩니다.
-5. `analysis_sync_consumer`가 해당 메시지를 읽습니다.
-6. `ProcessAnalysisSearchRepository`가 병목 / 불량 전이 결과를 Elasticsearch에 색인합니다.
-7. 조회 API는 ES를 먼저 보고, ES가 없을 때만 DB / Redis를 사용합니다.
+```mermaid
+flowchart TD
+    A["외부 제조 시스템"] --> B["Kafka Raw Topic\nfactory.manufacturing.raw"]
+    B --> C["raw_event_consumer"]
+    C --> D["sampledb.manufacturing_event_json"]
+    D --> E["병목 / 불량 전이 추론"]
+    E --> F["Kafka Analysis Topic\nfactory.manufacturing.analysis"]
+    F --> G["analysis_sync_consumer"]
+    G --> H1["Elasticsearch Bottleneck Index"]
+    G --> H2["Elasticsearch Defect Transfer Index"]
+    H1 --> I1["병목 조회 API"]
+    H2 --> I2["불량 전이 / 원인 조회 API"]
+```
 
 ### 주요 Kafka / ES 엔터티
 
@@ -153,9 +207,8 @@ Elasticsearch는 대용량 AI 분석 결과를 지연 없이 빠르게 조회하
 | Bottleneck Index | `settings.elasticsearch_bottleneck_index` | 병목 결과 검색 |
 | Defect Transfer Index | `settings.elasticsearch_defect_transfer_index` | 불량 전이 / 원인 검색 |
 
----
 
-## API 요약
+## 📡 API 요약
 
 ### 분석 조회
 
@@ -174,55 +227,57 @@ Elasticsearch는 대용량 AI 분석 결과를 지연 없이 빠르게 조회하
 
 - `GET /api/ai/manual`
 
----
 
-## 데이터 흐름
+## 🏗️ 프로젝트 구조
 
-### Kafka 수집
+```text
+app/
+├─ api/                     # FastAPI router 계층
+│  ├─ routers/
+│  │  ├─ process.py         # 병목 / 불량 전이 조회
+│  │  ├─ defect_transfer.py # 불량 전이 / 원인 조회
+│  │  ├─ analysis_maintenance.py # 병목 / 불량 전이 백필·재색인
+│  │  ├─ manual.py          # AI 메뉴얼
+│  │  └─ health.py          # 헬스 체크
+├─ service/
+│  ├─ analysis/             # 분석 조회 / 백필 / 재색인
+│  ├─ manufacturing/        # 제조 이벤트 처리
+│  └─ llm/                  # LLM 연동
+├─ repository/              # DB 접근 계층
+├─ search/                  # Elasticsearch 저장 / 조회
+├─ kafka/                   # Kafka 소비 / 발행
+├─ ml/                      # 모델 학습 / 추론 / SHAP
+├─ ai_manual/               # AI 메뉴얼 생성
+├─ dto/                     # 요청 / 응답 스키마
+├─ batch/                   # 배치 / 백필 작업
+└─ scheduler/               # 주기 실행 작업
+```
 
-1. 외부 시스템이 제조 원천 이벤트를 Kafka raw topic으로 보냅니다.
-2. `raw_event_consumer`가 메시지를 읽습니다.
-3. 원천 이벤트를 `manufacturing_event_json`에 저장합니다.
-4. 필요 시 병목 / 불량 전이 분석 이벤트를 `factory.manufacturing.analysis` topic으로 발행합니다.
-5. `analysis_sync_consumer`가 분석 결과를 읽고 Elasticsearch에 색인합니다.
+### 역할 요약
 
-### 병목
+- `app/service/analysis`: 분석 결과 조회와 관리 작업을 담당합니다.
+- `app/search`: Elasticsearch 인덱싱과 조회를 담당합니다.
+- `app/kafka`: 제조 이벤트 수집과 분석 결과 동기화를 담당합니다.
+- `app/ml`: 병목 탐지와 불량 전이 모델을 담당합니다.
+- `app/ai_manual`: 메뉴얼 생성 로직을 담당합니다.
 
-1. `sampledb.manufacturing_event_json`에서 이벤트를 읽습니다.
-2. 병목 모델이 공정별 병목을 계산합니다.
-3. `bottleneck_analysis_result`에 저장합니다.
-4. Elasticsearch에 재색인합니다.
-5. 조회 API는 ES 우선으로 응답합니다.
+## 🛠 전체 데이터 기능 흐름
+<img width="10217" height="5316" alt="데이터 기능 흐름도" src="https://github.com/user-attachments/assets/02488ac3-03af-4d68-ae0a-96fbdced0e4a" />
 
-### 불량 전이 / 원인
+## 🧭 시스템 다이어그램
 
-1. `sampledb.manufacturing_event_json`에서 SENT 이벤트를 읽습니다.
-2. 불량 전이 모델이 예측을 수행합니다.
-3. `defect_transfer_prediction_result`에 저장합니다.
-4. Elasticsearch에 재색인합니다.
-5. 조회 API는 차량별 최신 1건을 반환합니다.
-6. 원인 분석은 최신 불량 전이 결과의 SHAP 원인을 보여줍니다.
-
-### AI 메뉴얼
-
-1. 요청 헤더에서 JWT를 읽습니다.
-2. 사용자 ID를 추출합니다.
-3. 메뉴얼 서비스를 호출해 응답을 만듭니다.
-
-### Kafka / ES 전체 흐름
+### AI 서비스 분석 흐름
 
 ```mermaid
 flowchart LR
-    A["외부 제조 시스템"] --> B["Kafka Raw Topic<br/>factory.manufacturing.raw"]
+    A["외부 제조 시스템"] --> B["Kafka Raw Topic"]
     B --> C["raw_event_consumer"]
-    C --> D["sampledb.manufacturing_event_json"]
-    D --> E["병목 / 불량 전이 분석"]
-    E --> F["Kafka Analysis Topic<br/>factory.manufacturing.analysis"]
+    C --> D["DB / 원천 저장"]
+    D --> E["병목 / 불량 전이 추론"]
+    E --> F["Kafka Analysis Topic"]
     F --> G["analysis_sync_consumer"]
-    G --> H1["Elasticsearch Bottleneck Index"]
-    G --> H2["Elasticsearch Defect Transfer Index"]
-    H1 --> I1["병목 조회 API"]
-    H2 --> I2["불량 전이 / 원인 조회 API"]
+    G --> H["Elasticsearch"]
+    H --> I["조회 API"]
 ```
 
 ### ES 조회 우선순위
@@ -238,7 +293,7 @@ sequenceDiagram
     alt ES success
         ES-->>API: 최신 결과
     else ES fail
-        API->>Cache: cached response lookup
+        API->>Cache: 캐시 조회
         alt Cache hit
             Cache-->>API: cached page
         else Cache miss
@@ -248,162 +303,7 @@ sequenceDiagram
     end
 ```
 
----
-
-## 프로젝트 구조
-
-```text
-app/
-├─ api/                     # FastAPI 라우터
-│  ├─ router.py             # API 라우터 통합
-│  └─ routers/              # 기능별 엔드포인트
-│     ├─ process.py         # 병목 조회
-│     ├─ defect_transfer.py # 불량 전이 / 원인 조회
-│     ├─ analysis_maintenance.py # 병목 / 불량 전이 백필, 재색인
-│     ├─ manual.py          # AI 메뉴얼
-│     ├─ manufacturing_event.py  # 제조 이벤트 생성/조회
-│     └─ health.py          # 헬스 체크
-├─ service/
-│  ├─ analysis/              # 병목, 불량 전이, 재색인, 조회 로직
-│  ├─ manufacturing/         # 제조 이벤트 생성 및 처리
-│  └─ llm/                   # LLM 연동 계층
-├─ repository/               # DB 읽기 / 쓰기
-│  ├─ bottleneck_analysis_repository.py
-│  ├─ defect_transfer_prediction_repository.py
-│  ├─ manufacturing_event_repository.py
-│  ├─ manufacturing_event_template_repository.py
-│  ├─ equipment_repository.py
-│  └─ sampledb_schema.py
-├─ search/                   # Elasticsearch 저장 / 조회
-├─ ml/                       # 모델 추론, 학습 산출물, feature 처리
-│  ├─ inference/             # 추론기
-│  ├─ training/              # 학습 산출물 / 실험 노트북
-│  ├─ features/              # feature 생성
-│  └─ artifacts/             # 배포용 모델 파일
-├─ ai_manual/                # AI 메뉴얼 생성
-│  ├─ repository/            # 알림 이벤트, 사용자 정보 조회
-│  ├─ rag/                   # 벡터 검색
-│  ├─ prompt/                # 프롬프트 템플릿
-│  └─ schema/                # 메뉴얼 요청 / 응답 모델
-├─ kafka/                    # 제조 이벤트 수집 / 발행
-├─ dto/                      # 요청 / 응답 모델
-├─ utils/                    # 공통 유틸
-├─ scheduler/                # 주기 실행 품질/제조 작업
-└─ batch/                    # 백필 / 배치 작업
-```
-
-### 역할 요약
-
-- `app/api`: 외부 요청을 받는 진입점
-- `app/service/analysis`: 병목, 불량 전이, 재색인, 조회 로직
-- `app/repository`: DB 읽기 / 쓰기
-- `app/search`: Elasticsearch 저장 / 조회
-- `app/ai_manual`: AI 메뉴얼 생성
-- `app/ml`: 모델 추론과 산출물 관리
-- `app/kafka`: 제조 이벤트 수집과 후속 처리
-- `app/scheduler`: 주기적으로 실행되는 품질/제조 작업
-- `app/batch`: 수동 실행용 백필 / 배치 작업
-
----
-
-## 시스템 다이어그램
-
-### 전체 분석 흐름
-
-```mermaid
-flowchart TD
-    A["Manufacturing Event Source"] --> B["Kafka Raw Topic"]
-    B --> C["raw_event_consumer"]
-    C --> D["DB: manufacturing_event_json"]
-    D --> E["Analysis Service"]
-    E --> F1["Bottleneck Detector"]
-    E --> F2["Defect Transfer Detector"]
-    F1 --> G1["DB: bottleneck_analysis_result"]
-    F2 --> G2["DB: defect_transfer_prediction_result"]
-    G1 --> H1["Kafka Analysis Topic"]
-    G2 --> H1
-    H1 --> I["analysis_sync_consumer"]
-    I --> J1["Elasticsearch Bottleneck Index"]
-    I --> J2["Elasticsearch Defect Transfer Index"]
-    J1 --> K1["/api/ai/process/bottleneck"]
-    J2 --> K2["/api/ai/process/defect-transfer/predictions"]
-    J2 --> K3["/api/ai/process/defect-transfer/causes"]
-```
-
-### 병목 조회 흐름
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant API as Bottleneck API
-    participant S as Bottleneck Service
-    participant ES as Elasticsearch
-    participant DB as DB
-
-    U->>API: GET /api/ai/process/bottleneck
-    API->>S: get_cached_realtime_bottlenecks()
-    S->>ES: list_bottleneck_page()
-    alt ES success
-        ES-->>S: latest bottleneck rows
-    else ES fail
-        S->>DB: list_results()
-        DB-->>S: fallback rows
-    end
-    S-->>API: BottleneckAnalysisPage
-    API-->>U: JSON response
-```
-
-### 불량 전이 / 원인 흐름
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant API as Defect API
-    participant S as Defect Service
-    participant ES as Elasticsearch
-    participant DB as DB
-
-    U->>API: GET /api/ai/process/defect-transfer/predictions
-    API->>S: get_cached_predictions()
-    S->>ES: list_defect_prediction_page()
-    alt ES success
-        ES-->>S: vehicle latest rows
-    else ES fail
-        S->>DB: list_prediction_page()
-        DB-->>S: fallback rows
-    end
-    S-->>API: DefectTransferPredictionPage
-    API-->>U: JSON response
-
-    U->>API: GET /api/ai/process/defect-transfer/causes
-    API->>S: get_cached_cause_analysis()
-    S->>ES: get_latest_defect_cause_document()
-    ES-->>S: latest vehicle cause docs
-    S-->>API: DefectTransferCausePage
-    API-->>U: JSON response
-```
-
-### AI 메뉴얼 흐름
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant API as Manual API
-    participant M as Manual Service
-    participant R as RAG / Manual Data
-
-    U->>API: GET /api/ai/manual
-    API->>API: Read JWT from Authorization header
-    API->>M: generate_manual(user_id)
-    M->>R: load relevant manual context
-    R-->>M: manual content
-    M-->>API: generated manual
-    API-->>U: JSON response
-```
-
----
-
-## 실행
+## ⚙️ 실행
 
 ```powershell
 python -m venv venv
@@ -418,13 +318,19 @@ uvicorn app.main:app --reload
 - Health: `http://127.0.0.1:8000/api/health`
 - Swagger: `http://127.0.0.1:8000/docs`
 
----
 
-## 참고 포인트
 
-- 병목의 날짜 기준 필드는 `detected_at`입니다.
-- 불량 전이와 SHAP의 날짜 기준 필드는 `predicted_at`입니다.
-- 병목은 공정 단위, 불량 전이는 차량 단위로 조회합니다.
-- `dateOptions`는 ES 기준으로 만들고, ES 실패 시 DB로 내려갑니다.
-- 병목 / 불량 전이 / SHAP / 메뉴얼은 서로 다른 책임을 가지지만, 모두 제조 이벤트를 중심으로 연결됩니다.
-- DB는 정본 데이터, Elasticsearch는 빠른 조회용 검색 인덱스로 이해하면 전체 구조를 잡기 쉽습니다.
+## 🔧 기술 스택
+![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Kafka](https://img.shields.io/badge/Apache%20Kafka-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)
+![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?style=for-the-badge&logo=elasticsearch&logoColor=white)
+![MySQL](https://img.shields.io/badge/MySQL-4479A1?style=for-the-badge&logo=mysql&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white)
+![scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E?style=for-the-badge&logo=scikitlearn&logoColor=white)
+![LightGBM](https://img.shields.io/badge/LightGBM-00A86B?style=for-the-badge&logo=lightgbm&logoColor=white)
+![XGBoost](https://img.shields.io/badge/XGBoost-1E1E1E?style=for-the-badge&logo=xgboost&logoColor=white)
+![CatBoost](https://img.shields.io/badge/CatBoost-FF9D00?style=for-the-badge&logo=catboost&logoColor=white)
+![LightGBM](https://img.shields.io/badge/LightGBM-00A86B?style=for-the-badge&logo=lightgbm&logoColor=white)
+![SHAP](https://img.shields.io/badge/SHAP-4B5563?style=for-the-badge&logo=shap&logoColor=white)
+![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white)
