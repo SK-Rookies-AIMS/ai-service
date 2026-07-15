@@ -37,6 +37,9 @@ class AlertEventRepository:
         with main_engine.connect() as conn:
             row = conn.execute(query).mappings().first()
 
+            print("조회 결과:", row)
+            print("타입:", type(row))
+
         if not row:
             return None
 
