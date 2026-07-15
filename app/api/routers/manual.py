@@ -39,9 +39,14 @@ def generate_manual(request: Request):
     result = service.generate_manual(user_id)
 
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail="처리할 이벤트가 없습니다."
-        )
+        return {
+            "success": True,
+            "message": "처리할 이벤트가 없습니다.",
+            "data": None
+        }
 
-    return result
+    return {
+        "success": True,
+        "message": "매뉴얼 생성 완료",
+        "data": result
+    }
