@@ -71,7 +71,7 @@ def create_app() -> FastAPI:
         try:
             initialize_sampledb(settings.sample_database_connection_url)
         except Exception:
-            logger.exception("sampledb 스키마 초기화에 실패했습니다.")
+            logger.exception("sampledb 스키마 초기화에 실패했습니다.") 
 
     @app.on_event("startup")
     async def start_background_schedulers() -> None:
