@@ -298,6 +298,51 @@ app/
 - `GET /api/ai/process/defect-transfer/predictions`
 - `GET /api/ai/process/defect-transfer/causes`
 
+#### 병목 조회 API
+
+- 병목 목록과 날짜 옵션을 함께 조회합니다.
+- 기본적으로 ES의 `detectedAt` 기준 최신 날짜를 우선 보여줍니다.
+- 응답에는 공정 순위, 지연 시간, 영향 차량 수, 위험도, 다음 페이지 여부가 포함됩니다.
+- 날짜를 지정하면 해당 일자의 병목 결과만 다시 조회합니다.
+
+예시 응답 필드:
+
+- `mostBottleneckProcess`
+- `mostBottleneckRiskLevel`
+- `date`
+- `dateOptions`
+- `content`
+- `hasNext`
+- `nextCursor`
+
+#### 불량 예측 및 전이 예측 API
+
+- 차량별 불량 예측 결과와 전이 경로를 조회합니다.
+- 기본적으로 ES의 `predictedAt` 기준 최신 날짜를 우선 보여줍니다.
+- 응답에는 차량 ID, 현재 공정, 예측 공정, 전이 확률, 위험도, 다음 페이지 여부가 포함됩니다.
+- 날짜를 지정하면 해당 일자의 예측 결과만 다시 조회합니다.
+
+예시 응답 필드:
+
+- `date`
+- `dateOptions`
+- `content`
+- `vehicleId`
+- `carMasterId`
+- `currentProcess`
+- `predictedDefectProcess`
+- `defectProbability`
+- `riskLevel`
+- `hasNext`
+- `nextCursor`
+
+#### 원인 분석 API
+
+- 특정 차량의 최신 불량 예측 결과를 기반으로 원인을 조회합니다.
+- `main_causes`는 대표 원인, `detailCauses`는 상세 원인입니다.
+- 차량 ID가 없으면 최신 차량 기준으로 조회할 수 있습니다.
+- 응답은 `대표 원인`과 `상세 원인`을 분리해 화면에 바로 뿌릴 수 있는 형태입니다.
+
 ### 관리 API
 
 - `POST /api/ai/admin/analysis/backfill/bottleneck`
@@ -328,13 +373,48 @@ app/
 
 
 &nbsp;
-## ⚙️ 실행
+## ⚙️ 가상환경 생성 및 실행
+
+PowerShell 기준:
 
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
+```
+
+가상환경이 정상적으로 활성화되면 프롬프트 앞에 `(venv)`가 표시됩니다.
+
+```powershell
+(venv) PS C:\rookies\aims\ai-service>
+```
+
+의존성 설치:
+
+```powershell
 pip install -r requirements.txt
+```
+
+`requirements.txt`에는 FastAPI, LLM/API 연동, Kafka, 데이터 처리, ML 관련 의존성을 모두 포함합니다.
+
+Windows에서 Python 3.14를 사용하는 경우 일부 패키지의 사전 빌드 wheel이 없으면 `pydantic-core`, `orjson`, `pandas`, `scipy`, `scikit-learn` 등이 소스 빌드를 시도할 수 있습니다. 이 경우 Visual Studio Build Tools가 필요할 수 있으므로, 설치 문제가 반복되면 Python 3.12 또는 3.13 사용을 권장합니다.
+
+개발 서버 실행:
+
+```powershell
 uvicorn app.main:app --reload
+```
+
+서버 실행 후 아래 주소에서 확인할 수 있습니다.
+
+- API Root: `http://127.0.0.1:8000/`
+- Health Check: `http://127.0.0.1:8000/api/health`
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- OpenAPI Schema: `http://127.0.0.1:8000/openapi.json`
+
+가상환경 비활성화:
+
+```powershell
+deactivate
 ```
 
 주요 주소:

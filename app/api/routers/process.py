@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Depends, Query
+from __future__ import annotations
+
 from datetime import date as DateType
+
+from fastapi import APIRouter, Depends, Query
 
 from app.dto.response import BottleneckAnalysisPage, CommonResponse
 from app.service.analysis.bottleneck_service import (
@@ -13,63 +16,59 @@ router = APIRouter(prefix="/api/ai/process", tags=["process"])
 BottleneckAnalysisResponse = CommonResponse[BottleneckAnalysisPage]
 
 BottleneckAnalysisDescription = """
-Kafka raw 제조 이벤트를 기반으로 현재 제조 공정의 병목 순위를 조회합니다.
+병목 분석 조회 API입니다.
 
-분석 입력 데이터:
-- `sample_db.manufacturing_event_json` 테이블의 `is_sent = true` 이벤트만 사용합니다.
-- Kafka consumer가 `factory.manufacturing.raw` 토픽에서 받은 record value의 `eventJson`을 저장한 데이터입니다.
-- `manufacturing_event_id`는 `manufacturing_event_json.id`를 의미합니다.
-- `analysis_status`는 병목 분석 상태가 아니라 다른 이상 탐지 로직용 값이므로 병목 분석 필터로 사용하지 않습니다.
+무엇을 반환하나요
+- 공정별 병목 순위
+- 지연 시간
+- 영향 차량 수
+- 위험도와 위험 점수
+- 다음 페이지 여부와 다음 커서
 
-분석 방식:
-- PRESS, BODY, PAINT, ASSEMBLY 이벤트를 Kafka에서 계속 수신해 DB에 적재합니다.
-- Kafka raw 이벤트가 저장되면 Rule Engine + Isolation Forest 모델로 병목 결과를 자동 갱신합니다.
-- AI 병목 분석 결과는 `factory.manufacturing.analysis` 토픽으로도 발행합니다.
-- 분석 결과 토픽의 Message Key는 raw 토픽과 동일하게 `carId`입니다.
-- 발행 payload에는 `manufacturingAnalysisData`와 `aiAnalysisData`를 포함합니다.
-- 병목 조회 시에도 저장된 raw 이벤트 기준으로 최신 결과를 다시 확인합니다.
-- 결과는 `bottleneck_analysis_result` 테이블에 저장됩니다.
-- `delayTime`은 DB에는 계산된 원본 double 값으로 저장하고, API 응답에서는 소수점 둘째 자리까지 반환합니다.
-- `processCode`는 장비 코드 기준으로 `도장 (L1)`, `프레스 (P4)` 형식으로 반환합니다.
+어떤 데이터를 사용하나요
+- `sampledb.manufacturing_event_json`의 `is_sent = true` 이벤트
+- ES 인덱스의 `detectedAt` 기준 날짜 옵션
+- 병목 결과 저장 테이블 `bottleneck_analysis_result`
 
-페이지네이션:
-- `cursor`는 페이지 번호입니다. 생략하면 `0`으로 처리됩니다.
-- `size=5`, `cursor=0`이면 1~5위, `cursor=1`이면 6~10위를 반환합니다.
-- `hasNext=false`이면 다음 페이지를 호출하지 않아야 합니다.
-- 분석 가능한 이벤트가 없거나 cursor가 마지막 페이지를 넘으면 404가 아니라 빈 `content`와 `hasNext=false`를 반환합니다.
+조회 방식
+- 기본적으로 ES를 우선 조회합니다.
+- ES가 비어 있거나 실패하면 Redis 캐시를 확인하고, 캐시가 없으면 DB로 fallback합니다.
+- 날짜를 주지 않으면 최신 가능한 날짜를 자동 선택합니다.
+- `cursor`와 `size`로 페이지를 제어합니다.
 
-캐시:
-- Redis에 cursor/size별 결과를 캐시합니다.
-- Kafka raw 이벤트가 새로 수신되면 병목 캐시를 무효화합니다.
+주의 사항
+- 병목은 공정 단위로 집계됩니다.
+- 날짜 옵션은 ES 기준으로 생성됩니다.
+- 재색인 / 백필 시 해당 날짜의 기존 결과를 다시 계산합니다.
 """
 
 BottleneckAnalysisExample = {
     "success": True,
     "data": {
-        "mostBottleneckProcess": "도장",
-        "mostBottleneckRiskLevel": "위험",
+        "mostBottleneckProcess": "차체",
+        "mostBottleneckRiskLevel": "HIGH",
         "content": [
             {
                 "rankNo": 1,
-                "processCode": "도장 (L3)",
+                "processCode": "차체 (L3)",
                 "delayTime": 12.4,
                 "affectedVehicleCount": 128,
                 "riskScore": 5.0,
-                "riskLevel": "위험",
+                "riskLevel": "HIGH",
             },
             {
                 "rankNo": 2,
-                "processCode": "차체 (S12)",
+                "processCode": "의장 (S12)",
                 "delayTime": 9.8,
                 "affectedVehicleCount": 92,
                 "riskScore": 4.0,
-                "riskLevel": "위험",
+                "riskLevel": "HIGH",
             },
         ],
         "hasNext": True,
         "nextCursor": 1,
     },
-    "message": "병목 분석이 완료되었습니다.",
+    "message": "병목 분석 조회가 완료되었습니다.",
     "timestamp": "2026-06-30T11:10:00+09:00",
 }
 
@@ -77,9 +76,9 @@ BottleneckAnalysisExample = {
 @router.get(
     "/bottleneck",
     response_model=BottleneckAnalysisResponse,
-    summary="제조 공정 병목 분석 결과 조회",
+    summary="병목 분석 결과 조회",
     description=BottleneckAnalysisDescription,
-    response_description="제조 공정 병목 순위 페이지",
+    response_description="병목 순위 페이지",
     responses={
         200: {
             "description": "병목 분석 결과 조회 성공",
@@ -90,21 +89,21 @@ BottleneckAnalysisExample = {
             },
         },
         500: {
-            "description": "Redis 캐시, 모델 파일, DB 처리 중 오류가 발생한 경우",
+            "description": "Redis 캐시, ES 인덱스, DB 처리 중 오류가 발생한 경우",
         },
     },
 )
 def get_bottleneck_analysis(
     date: DateType | None = Query(
         default=None,
-        description="조회할 날짜입니다. 미지정 시 최신 날짜를 사용합니다.",
+        description="조회할 날짜입니다. 미지정 시 최신 가능한 날짜를 사용합니다.",
     ),
     cursor: int | None = Query(
         default=None,
         ge=0,
         description=(
-            "조회할 페이지 번호입니다. 생략하면 0으로 처리합니다. "
-            "cursor=0,size=5는 1~5위, cursor=1,size=5는 6~10위를 반환합니다."
+            "조회할 페이지 번호입니다. 미지정 시 0으로 처리합니다. "
+            "cursor=0,size=5는 1~5건, cursor=1,size=5는 6~10건을 의미합니다."
         ),
         examples=[0],
     ),
@@ -117,7 +116,7 @@ def get_bottleneck_analysis(
     ),
     service: BottleneckAnalysisService = Depends(get_bottleneck_analysis_service),
 ) -> BottleneckAnalysisResponse:
-    """Redis 캐시를 통해 병목 분석 결과 페이지를 반환합니다."""
+    """Redis 캐시를 우선 사용해 병목 분석 페이지를 반환합니다."""
     page: BottleneckAnalysisPage = service.get_cached_realtime_bottlenecks(
         cursor=cursor,
         size=size,
@@ -125,5 +124,5 @@ def get_bottleneck_analysis(
     )
     return success_response(
         data=page,
-        message="병목 분석이 완료되었습니다.",
+        message="병목 분석 조회가 완료되었습니다.",
     )
