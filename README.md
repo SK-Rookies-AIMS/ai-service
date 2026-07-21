@@ -19,7 +19,8 @@
 
 ### 1. 불량 탐지 및 전이 예측
 
-<img width="984" height="1263" alt="혼합불량" src="https://github.com/user-attachments/assets/386bac8e-5f96-4dbe-a413-1cdc48c0ef93" />
+<img width="1784" height="455" alt="image" src="https://github.com/user-attachments/assets/cddde118-b7f0-4ec5-9987-f6f3ec648414" />
+<img width="1784" height="455" alt="image" src="https://github.com/user-attachments/assets/8cdcc7e2-0104-4370-b755-d0d3ada78545" />
 
 - 차량 단위로 다음 공정 불량 가능성을 예측하고 전이 경로를 함께 봅니다.
 - 현재 공정, 다음 공정, 설비 신호, 사이클 타임, 대기 시간, 재공 수량, 진동/온도/도막 두께를 함께 봅니다.
@@ -66,7 +67,7 @@
 4. ES의 `predictedAt`을 기준으로 최신 1건을 보여줍니다.
 
 #### SHAP 원인 분석
-<img width="884" height="684" alt="main 원인" src="https://github.com/user-attachments/assets/2165f137-0bee-4cb5-a5d1-d1ea7373e464" />
+<img width="884" height="684" alt="image" src="https://github.com/user-attachments/assets/d35a34ac-7cc0-4a24-b07e-229312bd9c8e" />
 
 - 원인 분석은 불량 탐지 및 전이 예측 결과를 해석하는 단계입니다.
 - SHAP 값을 이용해 주요 원인 1개와 상세 원인 여러 개를 분리합니다.
@@ -90,7 +91,7 @@
 &nbsp;
 ### 2. 병목 분석
 
-<img width="868" height="556" alt="다운로드 (1)" src="https://github.com/user-attachments/assets/0f681bf1-4859-4ecc-abe3-c193a68efa81" />
+<img width="868" height="556" alt="image" src="https://github.com/user-attachments/assets/fe4bcab4-d22c-4958-87e1-242e399bf981" />
 
 - `sampledb.manufacturing_event_json`의 제조 이벤트를 읽어 공정별 병목을 계산합니다.
 - 결과는 공정 순위, 지연 시간, 영향 차량 수, 위험도 형태로 정리됩니다.
@@ -139,7 +140,7 @@
 ### 3. 🤖 AI 메뉴얼
 | 이상 이벤트 발생 | 주니어 | 시니어 |
 |---|---|---|
-| <img width="582" height="506" alt="이상 이벤트 발생" src="https://github.com/user-attachments/assets/faac7e24-4756-4ee7-be91-bf9e813e6a2c" /> | <img width="582" height="506" alt="주니어" src="https://github.com/user-attachments/assets/9e0900e0-50ef-4b2f-aafd-7d18428d8a58" /> | <img width="565" height="500" alt="시니어" src="https://github.com/user-attachments/assets/6122f166-a6af-4e34-9474-0b7ba454f977" /> |
+| <img width="582" height="506" alt="이상 이벤트 발생" src="https://github.com/user-attachments/assets/faac7e24-4756-4ee7-be91-bf9e813e6a2c" /> | <img width="582" height="506" alt="주니어" src="https://github.com/user-attachments/assets/9e0900e0-50ef-4b2f-aafd-7d18428d8a58" /> | <img width="565" height="500" alt="시니어" src="https://github.com/user-attachments/assets/b8444157-0aad-4c70-b03f-dfe28db7b259" /> |
 
 - JWT 인증을 통과한 사용자만 메뉴얼을 생성합니다.
 - 이벤트, 설비 맥락, 사내 지침, 검색된 문서를 함께 사용합니다.
