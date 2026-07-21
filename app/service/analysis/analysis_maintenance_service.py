@@ -26,7 +26,7 @@ from app.repository.defect_transfer_prediction_repository import (
 from app.repository.sampledb_schema import car_master
 from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.utils.database_utils import mysql_connect_args_for_seoul
-from app.utils.datetime_utils import seoul_now
+from app.utils.datetime_utils import SEOUL_TZ, seoul_now
 from app.utils.process_label_utils import NEXT_PROCESS, format_process_with_line
 from app.utils.process_label_utils import equipment_code_for_car_process
 
@@ -525,12 +525,13 @@ class AnalysisMaintenanceService:
         sync_id = f"SNAP-{uuid4()}"
         first_history = histories[0]
         first_summary = summaries[0] if summaries else {}
+        detected_at_iso = self._to_seoul_iso(detected_at)
         return {
             "syncId": sync_id,
             "analysisType": "BOTTLENECK_ANALYSIS_SYNC",
             "sourceService": "AI_SERVICE",
-            "detectedAt": detected_at.isoformat(),
-            "analyzedAt": detected_at.isoformat(),
+            "detectedAt": detected_at_iso,
+            "analyzedAt": detected_at_iso,
             "eventId": first_history.get("event_id"),
             "carMasterId": first_history.get("car_master_id"),
             "mostBottleneckProcess": first_summary.get("process_code"),
@@ -576,6 +577,7 @@ class AnalysisMaintenanceService:
         )
         fallback_date = self._analysis_date(row)
         predicted_at = self._predict_at(row, fallback_date)
+        predicted_at_iso = self._to_seoul_iso(predicted_at)
         causes = [
             {
                 "rank": cause.rank,
@@ -587,7 +589,6 @@ class AnalysisMaintenanceService:
             }
             for cause in prediction.causes
         ]
-        predicted_at_iso = predicted_at.isoformat()
         return {
             "syncId": sync_id,
             "analysisType": "DEFECT_TRANSFER_ANALYSIS_SYNC",
@@ -639,14 +640,14 @@ class AnalysisMaintenanceService:
     def _analysis_date(row: dict[str, Any]) -> DateType:
         value = row.get("event_time")
         if isinstance(value, datetime):
-            return value.date()
+            return AnalysisMaintenanceService._to_seoul_naive(value).date()
         return seoul_now().date()
 
     @staticmethod
     def _predict_at(row: dict[str, Any], fallback_date: DateType) -> datetime:
         value = row.get("event_time")
         if isinstance(value, datetime):
-            return value if value.tzinfo is None else value.replace(tzinfo=None)
+            return AnalysisMaintenanceService._to_seoul_naive(value)
         return datetime.combine(fallback_date, datetime.min.time())
 
     @staticmethod
@@ -703,13 +704,25 @@ class AnalysisMaintenanceService:
     @staticmethod
     def _analysis_detected_at(histories: list[dict[str, Any]]) -> datetime:
         candidates = [
-            value.replace(tzinfo=None) if isinstance(value, datetime) and value.tzinfo else value
+            AnalysisMaintenanceService._to_seoul_naive(value)
             for value in (row.get("event_time") for row in histories)
             if isinstance(value, datetime)
         ]
         if candidates:
             return max(candidates)
         return seoul_now().replace(tzinfo=None)
+
+    @staticmethod
+    def _to_seoul_naive(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(SEOUL_TZ).replace(tzinfo=None)
+
+    @staticmethod
+    def _to_seoul_iso(value: datetime) -> str:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=SEOUL_TZ).isoformat()
+        return value.astimezone(SEOUL_TZ).isoformat()
 
     @staticmethod
     def _rank_bottleneck_summaries(

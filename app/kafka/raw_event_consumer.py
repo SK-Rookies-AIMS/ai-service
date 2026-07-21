@@ -24,7 +24,7 @@ from app.repository.sampledb_schema import car_master
 from app.repository.sampledb_repository import SampleDbRepository
 from app.search.process_analysis_search import ProcessAnalysisSearchRepository
 from app.service.analysis.bottleneck_service import BottleneckAnalysisService
-from app.utils.datetime_utils import seoul_now_iso
+from app.utils.datetime_utils import SEOUL_TZ, seoul_now, seoul_now_iso
 from app.websocket.analysis_manager import analysis_websocket_manager
 logger = logging.getLogger(__name__)
 PROCESS_SEQUENCE = ("PRESS", "BODY", "PAINT", "ASSEMBLY")
@@ -470,7 +470,10 @@ def _parse_datetime(value: Any) -> datetime | None:
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(SEOUL_TZ).replace(tzinfo=None)
+        return parsed
     except ValueError:
         logger.warning("Cannot parse raw event time: %s", text)
         return None
@@ -1098,7 +1101,7 @@ def _save_defect_transfer_prediction(
             expected_occurrence_step=prediction.expected_steps_after,
             risk_grade=prediction.risk_level,
             causes=causes,
-            predicted_at=datetime.now(),
+            predicted_at=seoul_now().replace(tzinfo=None),
         )
     except Exception:
         logger.exception(
@@ -1316,7 +1319,9 @@ def _safe_float(value: Any, *, default: float) -> float:
 
 def _iso_or_none(value: Any) -> str | None:
     if isinstance(value, datetime):
-        return value.isoformat()
+        if value.tzinfo is None:
+            return value.replace(tzinfo=SEOUL_TZ).isoformat()
+        return value.astimezone(SEOUL_TZ).isoformat()
     return str(value) if value is not None else None
 
 
