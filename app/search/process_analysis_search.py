@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.core.config import settings
+from app.utils.datetime_utils import SEOUL_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -570,9 +571,21 @@ class ProcessAnalysisSearchRepository:
         if value is None:
             return None
         if isinstance(value, datetime):
-            return value.isoformat()
+            if value.tzinfo is None:
+                return value.replace(tzinfo=SEOUL_TZ).isoformat()
+            return value.astimezone(SEOUL_TZ).isoformat()
         text = str(value).strip()
-        return text or None
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=SEOUL_TZ)
+        else:
+            parsed = parsed.astimezone(SEOUL_TZ)
+        return parsed.isoformat()
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:

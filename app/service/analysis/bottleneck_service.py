@@ -20,7 +20,7 @@ from app.dto.response import (
 from app.ml.inference.bottleneck_detector import BottleneckDetector
 from app.repository.bottleneck_analysis_repository import BottleneckAnalysisRepository
 from app.search.process_analysis_search import ProcessAnalysisSearchRepository
-from app.utils.datetime_utils import seoul_now
+from app.utils.datetime_utils import SEOUL_TZ, seoul_now
 from app.utils.json_utils import from_json, to_json
 
 
@@ -342,13 +342,19 @@ class BottleneckAnalysisService:
     def _analysis_detected_at(histories: list[dict[str, Any]]) -> datetime:
         """분석된 이벤트 묶음의 기준 detected_at 시각을 계산한다."""
         candidates = [
-            value.replace(tzinfo=None) if isinstance(value, datetime) and value.tzinfo else value
+            BottleneckAnalysisService._to_seoul_naive(value)
             for value in (row.get("event_time") for row in histories)
             if isinstance(value, datetime)
         ]
         if candidates:
             return max(candidates)
         return seoul_now().replace(tzinfo=None)
+
+    @staticmethod
+    def _to_seoul_naive(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(SEOUL_TZ).replace(tzinfo=None)
 
     @staticmethod
     def _create_search_repository() -> ProcessAnalysisSearchRepository | None:
