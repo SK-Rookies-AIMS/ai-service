@@ -1,178 +1,676 @@
+from __future__ import annotations
+
+import json
 from collections.abc import Iterable
+from datetime import date as DateType
+from datetime import datetime
 from typing import Any
 
+from app.repository.sampledb_schema import manufacturing_event_json
 from app.utils.database_utils import mysql_connect_args_for_seoul
 
 
 class BottleneckAnalysisRepository:
-    """병목 분석 결과를 DB에 저장하고 조회하는 저장소 계층"""
+    """병목 분석 결과를 저장하고 sampledb.manufacturing_event_json 원천 이벤트를 읽는다."""
 
-    def __init__(self, database_url: str) -> None:
-        """MySQL 연결을 초기화하고 테이블 스키마를 보장한다."""
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        event_database_url: str | None = None,
+    ) -> None:
         self.database_url = database_url
+        self.event_database_url = event_database_url or database_url
         self.engine: Any | None = None
+        self.event_engine: Any | None = None
         self.table: Any | None = None
-        self.product_process_history_table: Any | None = None
         self.metadata: Any | None = None
 
         self._init_sqlalchemy()
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
-        """병목 분석 결과 테이블과 조회용 인덱스를 생성"""
+        """병목 결과 테이블이 없거나 구조가 다르면 DB 스키마를 맞춘다."""
+        # 병목 결과 테이블이 없거나 컬럼이 다르면 여기서 맞춘다.
         self.metadata.create_all(self.engine)
+        self._align_result_schema()
 
     def replace_results(
         self,
         rows: Iterable[dict[str, Any]],
-        detected_at: str,
+        detected_at: Any,
         *,
         start_rank: int,
         end_rank: int,
     ) -> None:
-        """요청 순위 구간 교체"""
-        payload = [{**row, "detected_at": detected_at} for row in rows]
-        self._validate_product_process_history_ids(payload)
+        """계산된 병목 순위 결과를 detected_at 스냅샷으로 저장한다."""
+        payload = [
+            {
+                key: value
+                for key, value in {**row, "detected_at": detected_at}.items()
+                if key != "id"
+            }
+            for row in rows
+        ]
+        if not payload:
+            return
 
+        # 새 분석 결과를 한 번에 저장한다.
         with self.engine.begin() as conn:
-            # 요청한 rank 범위만 갱신
+            conn.execute(self.table.insert(), payload)
+
+    def prune_results_after_rank(self, max_rank: int) -> None:
+        """현재 날짜의 병목 결과 중 상위 순위만 남기고 나머지를 삭제한다."""
+        from sqlalchemy import func
+        with self.engine.begin() as conn:
             conn.execute(
-                self.table.delete().where(
-                    self.table.c.rank_no.between(start_rank, end_rank),
-                ),
+                self.table.delete()
+                .where(self.table.c.rank_no > max_rank)
+                .where(func.date(self.table.c.detected_at) == func.current_date())
             )
-            if payload:
-                conn.execute(self.table.insert(), payload)
 
-    def list_results(self, *, cursor: int, size: int) -> list[dict[str, Any]]:
-        """요청 순위 페이지 조회"""
-        from sqlalchemy import select
+    def list_results(
+        self,
+        *,
+        cursor: int,
+        size: int,
+        analysis_date: DateType | None = None,
+    ) -> list[dict[str, Any]]:
+        """지정한 날짜의 최신 병목 스냅샷을 기준으로 결과 목록을 반환한다."""
+        # detected_at 스냅샷 기준으로 같은 날짜의 병목 결과만 읽는다.
+        snapshot_detected_at = self._latest_snapshot_detected_at(analysis_date)
+        if snapshot_detected_at is None:
+            return []
 
-        start_rank = cursor * size + 1
-        end_rank = start_rank + size - 1
-
-        query = select(self.table)
-        query = (
-            # 같은 순위가 있어도 조회 순서가 흔들리지 않도록 보조 정렬
-            query.where(self.table.c.rank_no.between(start_rank, end_rank))
-            .order_by(self.table.c.rank_no.asc(), self.table.c.id.asc())
-            .limit(size)
-        )
-
-        with self.engine.connect() as conn:
-            return [dict(row) for row in conn.execute(query).mappings()]
-
-    def count_results(self) -> int:
-        """저장된 병목 분석 결과 수를 반환"""
-        from sqlalchemy import func, select
-
-        query = select(func.count()).select_from(self.table)
-        with self.engine.connect() as conn:
-            return int(conn.execute(query).scalar_one())
-
-    def list_product_process_histories(self) -> list[dict[str, Any]]:
-        """분석에 사용할 product_process_history 전체를 조회"""
         from sqlalchemy import select
 
         query = (
             select(
-                self.product_process_history_table.c.id,
-                self.product_process_history_table.c.manufacturing_event_id,
-                self.product_process_history_table.c.car_master_id,
-                self.product_process_history_table.c.process_code,
-                self.product_process_history_table.c.equipment_code,
-                self.product_process_history_table.c.station_code,
-                self.product_process_history_table.c.process_time,
-                self.product_process_history_table.c.waiting_time,
+                self.table.c.id,
+                self.table.c.manufacturing_event_id,
+                self.table.c.car_master_id,
+                self.table.c.process_code,
+                self.table.c.equipment_code,
+                self.table.c.rank_no,
+                self.table.c.avg_delay_time,
+                self.table.c.affected_vehicle_count,
+                self.table.c.risk_score,
+                self.table.c.detected_at,
             )
-            .order_by(self.product_process_history_table.c.id.asc())
+            .where(self.table.c.detected_at == snapshot_detected_at)
+            .order_by(
+                self.table.c.rank_no.asc(),
+                self.table.c.id.asc(),
+            )
+        )
+
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(query).mappings()]
+
+        deduped = self._dedupe_rows(rows)
+        offset = cursor * size
+        return deduped[offset : offset + size]
+
+    def count_results(
+        self,
+        *,
+        analysis_date: DateType | None = None,
+    ) -> int:
+        """지정한 날짜의 최신 병목 결과 건수를 반환한다."""
+        # 조회 기준 날짜의 결과 건수를 세어 페이지네이션 여부를 판단한다.
+        snapshot_detected_at = self._latest_snapshot_detected_at(analysis_date)
+        if snapshot_detected_at is None:
+            return 0
+
+        from sqlalchemy import func, select
+
+        query = (
+            select(func.count())
+            .select_from(self.table)
+            .where(self.table.c.detected_at == snapshot_detected_at)
         )
         with self.engine.connect() as conn:
-            return [dict(row) for row in conn.execute(query).mappings()]
+            raw_count = int(conn.execute(query).scalar_one())
 
-    def _validate_product_process_history_ids(self, rows: list[dict[str, Any]]) -> None:
-        """병목 결과의 product_process_history_id가 실제 공정 이력 PK인지 검증"""
-        history_ids = {
-            int(row["product_process_history_id"])
-            for row in rows
-            if row.get("product_process_history_id") is not None
+        if raw_count <= 0:
+            return 0
+
+        return len(self.list_results(cursor=0, size=raw_count))
+
+    def delete_results_by_date(self, analysis_date: DateType) -> int:
+        """병목 결과 테이블에서 특정 날짜 스냅샷을 제거한다."""
+        from sqlalchemy import func
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                self.table.delete().where(func.date(self.table.c.detected_at) == analysis_date),
+            )
+        return int(result.rowcount or 0)
+
+    def list_manufacturing_event_histories(
+        self,
+        *,
+        analysis_date: DateType | None = None,
+    ) -> list[dict[str, Any]]:
+        """병목 분석용 원천 이벤트를 sampledb에서 읽어온다."""
+        # 병목 분석 대상 원천 이벤트를 sampledb에서 읽는다.
+        from sqlalchemy import select, func
+
+        query = (
+            select(
+                manufacturing_event_json.c.id,
+                manufacturing_event_json.c.car_master_id,
+                manufacturing_event_json.c.process_code,
+                manufacturing_event_json.c.equipment_id,
+                manufacturing_event_json.c.event_time,
+                manufacturing_event_json.c.event_json,
+            )
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
+            .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(
+                func.date(manufacturing_event_json.c.event_time)
+                == (analysis_date or func.current_date())
+            )
+            .order_by(manufacturing_event_json.c.id.asc())
+        )
+        with self.event_engine.connect() as conn:
+            rows = conn.execute(query).mappings()
+            return [
+                self._to_bottleneck_history(row)
+                for row in rows
+            ]
+
+    def list_pending_manufacturing_event_histories(
+        self,
+        *,
+        analysis_date: DateType | None = None,
+    ) -> list[dict[str, Any]]:
+        """아직 병목 분석이 끝나지 않은 원천 이벤트만 가져온다."""
+        # 아직 병목 분석이 끝나지 않은 원천 이벤트만 다시 가져온다.
+        from sqlalchemy import select, func
+
+        query = (
+            select(
+                manufacturing_event_json.c.id,
+                manufacturing_event_json.c.car_master_id,
+                manufacturing_event_json.c.process_code,
+                manufacturing_event_json.c.equipment_id,
+                manufacturing_event_json.c.event_time,
+                manufacturing_event_json.c.event_json,
+            )
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
+            .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(manufacturing_event_json.c.bottleneck_analysis_done.is_(False))
+            .where(
+                func.date(manufacturing_event_json.c.event_time)
+                == (analysis_date or func.current_date())
+            )
+            .order_by(manufacturing_event_json.c.id.asc())
+        )
+        with self.event_engine.connect() as conn:
+            rows = conn.execute(query).mappings()
+            return [
+                self._to_bottleneck_history(row)
+                for row in rows
+            ]
+
+    def list_date_options(self) -> list[dict[str, Any]]:
+        """dateOptions 표시용으로 detected_at 날짜와 대표 event_id를 묶어 반환한다."""
+        # 날짜 선택 UI용으로 detected_at 기준 옵션을 만든다.
+        from sqlalchemy import func, select
+
+        query = (
+            select(
+                func.date(self.table.c.detected_at).label("date"),
+                func.min(self.table.c.manufacturing_event_id).label(
+                    "sample_manufacturing_event_id",
+                ),
+            )
+            .where(self.table.c.detected_at.is_not(None))
+            .group_by(func.date(self.table.c.detected_at))
+            .order_by(func.date(self.table.c.detected_at).desc())
+        )
+        with self.engine.connect() as conn:
+            date_rows = [dict(row) for row in conn.execute(query).mappings()]
+
+        sample_event_ids = sorted(
+            {
+                int(row["sample_manufacturing_event_id"])
+                for row in date_rows
+                if row.get("sample_manufacturing_event_id") is not None
+            },
+        )
+        event_id_by_id: dict[int, str] = {}
+        if sample_event_ids:
+            event_query = select(
+                manufacturing_event_json.c.id,
+                manufacturing_event_json.c.event_id,
+            ).where(manufacturing_event_json.c.id.in_(sample_event_ids))
+            with self.event_engine.connect() as conn:
+                for event_row in conn.execute(event_query).mappings():
+                    event_id_by_id[int(event_row["id"])] = str(event_row["event_id"])
+
+        return [
+            {
+                "date": row["date"],
+                "sample_event_id": (
+                    event_id_by_id.get(int(row["sample_manufacturing_event_id"]))
+                    if row.get("sample_manufacturing_event_id") is not None
+                    else None
+                ),
+            }
+            for row in date_rows
+        ]
+
+    def _event_ids_for_today(self) -> list[int]:
+        """오늘 날짜로 들어온 병목 대상 이벤트 id 목록을 조회한다."""
+        from sqlalchemy import func, select
+
+        query = (
+            select(manufacturing_event_json.c.id)
+            .where(manufacturing_event_json.c.dispatch_status == "SENT")
+            .where(manufacturing_event_json.c.is_sent.is_(True))
+            .where(func.date(manufacturing_event_json.c.event_time) == func.current_date())
+        )
+        with self.event_engine.connect() as conn:
+            return [int(row[0]) for row in conn.execute(query).all()]
+
+    def _latest_snapshot_detected_at(
+        self,
+        analysis_date: DateType | None = None,
+    ) -> datetime | None:
+        from sqlalchemy import func, select
+
+        query = select(func.max(self.table.c.detected_at))
+        if analysis_date is not None:
+            query = query.where(func.date(self.table.c.detected_at) == analysis_date)
+        with self.engine.connect() as conn:
+            value = conn.execute(query).scalar_one()
+        return value
+
+    def mark_bottleneck_analysis_done(self, event_ids: Iterable[int]) -> int:
+        event_ids = [int(event_id) for event_id in event_ids]
+        if not event_ids:
+            return 0
+
+        from sqlalchemy import func
+
+        with self.event_engine.begin() as conn:
+            result = conn.execute(
+                manufacturing_event_json.update()
+                .where(manufacturing_event_json.c.id.in_(event_ids))
+                .values(
+                    bottleneck_analysis_done=True,
+                    updated_at=func.current_timestamp(),
+                ),
+            )
+        return int(result.rowcount or 0)
+
+    def reset_bottleneck_analysis_done(self, event_ids: Iterable[int]) -> int:
+        event_ids = [int(event_id) for event_id in event_ids]
+        if not event_ids:
+            return 0
+
+        from sqlalchemy import func
+
+        with self.event_engine.begin() as conn:
+            result = conn.execute(
+                manufacturing_event_json.update()
+                .where(manufacturing_event_json.c.id.in_(event_ids))
+                .values(
+                    bottleneck_analysis_done=False,
+                    updated_at=func.current_timestamp(),
+                ),
+            )
+        return int(result.rowcount or 0)
+
+    def _to_bottleneck_history(self, row: dict[str, Any]) -> dict[str, Any]:
+        event_json = self._event_json_dict(row["event_json"])
+        equipment = event_json.get("equipment", {})
+        equipment_status = event_json.get("equipmentStatus", {})
+        metrics = event_json.get("processMetrics", {})
+        equipment_code = str(
+            equipment.get("equipmentCode")
+            or row.get("equipment_id")
+            or "UNKNOWN",
+        )
+        process_data = event_json.get("processData", {})
+        process_code = str(row["process_code"])
+        operation_status = str(
+            equipment_status.get("operationStatus") or "",
+        ).upper()
+        process_time = self._safe_float(metrics.get("processingTimeSec"))
+        waiting_time = self._safe_float(metrics.get("waitingTimeSec"))
+        cycle_time = self._safe_float(metrics.get("cycleTimeSec"))
+        station_delay_time = self._safe_float(metrics.get("stationDelaySec"))
+        timestamp_delay_time = self._process_timestamp_delay(
+            process_data,
+            process_code,
+        )
+        equipment_stop_delay_time = self._equipment_stop_delay(
+            equipment_status,
+            event_json,
+            row.get("event_time"),
+        )
+        delay_time = (
+            station_delay_time
+            if station_delay_time > 0
+            else timestamp_delay_time
+            if timestamp_delay_time > 0
+            else equipment_stop_delay_time
+            if operation_status in {"FAULT", "STOPPED", "ERROR", "DOWN"}
+            else 0.0
+        )
+
+        return {
+            "id": int(row["id"]),
+            "manufacturing_event_id": int(row["id"]),
+            "car_master_id": row["car_master_id"],
+            "process_code": process_code,
+            "equipment_code": equipment_code,
+            "equipment_status": operation_status,
+            "station_key": equipment_code,
+            "process_time": process_time,
+            "waiting_time": waiting_time,
+            "cycle_time": cycle_time,
+            "delay_time": delay_time,
+            "queue_length": self._safe_float(metrics.get("queueLength")),
+            "wip_count": self._safe_float(metrics.get("wipCount")),
         }
-        if not history_ids:
-            return
 
-        from sqlalchemy import select
+    @staticmethod
+    def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return []
 
-        query = select(self.product_process_history_table.c.id).where(
-            self.product_process_history_table.c.id.in_(history_ids),
-        )
-        with self.engine.connect() as conn:
-            existing_ids = {int(row["id"]) for row in conn.execute(query).mappings()}
-
-        missing_ids = sorted(history_ids - existing_ids)
-        if missing_ids:
-            raise ValueError(
-                f"Invalid product_process_history_id values: {missing_ids}",
+        deduped: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for row in sorted(
+            rows,
+            key=lambda item: (
+                float(item.get("risk_score") or 0.0),
+                float(item.get("avg_delay_time") or 0.0),
+                int(item.get("affected_vehicle_count") or 0),
+                int(item.get("manufacturing_event_id") or 0),
+                int(item.get("car_master_id") or 0),
+                str(item.get("process_code") or "").strip().upper(),
+                str(item.get("equipment_code") or "").strip().upper(),
+                int(item.get("rank_no") or 0),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        ):
+            key = (
+                str(row.get("process_code") or "").strip().upper(),
+                str(row.get("equipment_code") or "").strip().upper(),
             )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(row)
+
+        deduped.sort(
+            key=lambda item: (
+                int(item.get("rank_no") or 0),
+                int(item.get("id") or 0),
+            ),
+        )
+        return deduped
+
+    @staticmethod
+    def _event_json_dict(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return json.loads(value)
+        return {}
+
+    @staticmethod
+    def _safe_float(value: Any) -> float:
+        if value is None:
+            return 0.0
+        return float(value)
+
+    @classmethod
+    def _process_timestamp_delay(
+        cls,
+        process_data: Any,
+        process_code: str,
+    ) -> float:
+        if not isinstance(process_data, dict):
+            return 0.0
+
+        candidates = [
+            process_code,
+            process_code.lower(),
+            process_code.upper(),
+        ]
+        for key in candidates:
+            value = process_data.get(key)
+            if isinstance(value, dict):
+                return cls._safe_float(value.get("timestampDelaySec"))
+        return 0.0
+
+    @classmethod
+    def _equipment_stop_delay(
+        cls,
+        equipment_status: dict[str, Any],
+        event_json: dict[str, Any],
+        event_time_value: Any,
+    ) -> float:
+        status_changed_at = cls._parse_datetime(
+            equipment_status.get("statusChangedTime"),
+        )
+        event_time = cls._parse_datetime(
+            event_time_value,
+        ) or cls._parse_datetime(
+            cls._nested_value(event_json, "event", "eventTime"),
+        )
+        if status_changed_at is None:
+            return 0.0
+
+        last_normal_time = cls._parse_datetime(
+            equipment_status.get("lastNormalTime"),
+        )
+
+        if event_time is not None and event_time > status_changed_at:
+            return (event_time - status_changed_at).total_seconds()
+
+        if last_normal_time is not None:
+            return max((status_changed_at - last_normal_time).total_seconds(), 0.0)
+
+        if event_time is None:
+            event_time = datetime.now()
+        else:
+            return 30.0
+
+        return max((event_time - status_changed_at).total_seconds(), 0.0)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Any | None:
+        if value is None:
+            return None
+        if hasattr(value, "isoformat") and hasattr(value, "tzinfo"):
+            return value.replace(tzinfo=None)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(
+                text.replace("Z", "+00:00"),
+            ).replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _nested_value(payload: dict[str, Any], *path: str) -> Any:
+        current: Any = payload
+        for key in path:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(key)
+        return current
 
     def _init_sqlalchemy(self) -> None:
-        """MySQL 연결을 위한 SQLAlchemy 엔진과 테이블 메타데이터를 구성"""
         try:
-            from sqlalchemy import BigInteger, Column, DateTime, Double, Float, ForeignKey
-            from sqlalchemy import Index, Integer, MetaData, String, Table
+            from sqlalchemy import BigInteger, Column, DateTime, Double, Enum
+            from sqlalchemy import Index, Integer, MetaData, String, Table, func
             from sqlalchemy import create_engine
         except ModuleNotFoundError as exc:
             raise RuntimeError(
-                "외부 DB를 사용하려면 requirements.txt의 sqlalchemy, pymysql 패키지가 필요합니다.",
+                "SQLAlchemy and PyMySQL are required for bottleneck analysis storage.",
             ) from exc
 
         self.metadata = MetaData()
-        self.product_process_history_table = Table(
-            "product_process_history",
-            self.metadata,
-            Column("id", BigInteger, primary_key=True, autoincrement=True),
-            # sampledb manufacturing_event.id에 대한 논리 참조이며 DB 간 FK는 두지 않음
-            Column("manufacturing_event_id", BigInteger),
-            # sampledb car_master.id에 대한 논리 참조이며 DB 간 FK는 두지 않음
-            Column("car_master_id", BigInteger),
-            Column("process_code", String(20), nullable=False),
-            Column("equipment_code", String(50), nullable=False),
-            Column("station_code", String(50), nullable=False),
-            Column("lot_code", String(50)),
-            Column("started_at", DateTime, nullable=False),
-            Column("ended_at", DateTime, nullable=False),
-            Column("process_time", Double),
-            Column("waiting_time", Double),
-            Column("result_status", String(20), nullable=False),
-            Column("sequence_no", Integer, nullable=False),
-            Column("previous_process_code", String(20)),
-            Column("created_at", DateTime, nullable=False),
-            Index("idx_product_process_history_event_id", "manufacturing_event_id"),
-            Index("idx_product_process_history_car_master_id", "car_master_id"),
-            Index("idx_product_process_history_process_code", "process_code"),
-        )
-        # SQLAlchemy Core 테이블 정의를 사용해 MySQL DDL/CRUD를 DB 방언에 맞게 생성
+        process_code_enum = Enum("PRESS", "BODY", "PAINT", "ASSEMBLY")
         self.table = Table(
             "bottleneck_analysis_result",
             self.metadata,
-            Column("id", Integer, primary_key=True, autoincrement=True),
-            Column("product_process_history_id", BigInteger, ForeignKey("product_process_history.id")),
-            Column("manufacturing_event_id", Integer),
-            Column("car_master_id", Integer),
-            Column("process_code", String(64), nullable=False),
-            Column("equipment_code", String(64), nullable=False),
-            Column("station_code", String(64), nullable=False),
-            Column("rank_no", Integer, nullable=False),
-            Column("avg_delay_time", Float, nullable=False),
-            Column("affected_vehicle_count", Integer, nullable=False),
-            Column("risk_score", Float, nullable=False),
-            Column("detected_at", String(64), nullable=False),
+            Column("id", BigInteger, primary_key=True, autoincrement=True),
+            Column("manufacturing_event_id", BigInteger),
+            Column("car_master_id", BigInteger),
+            Column("process_code", process_code_enum),
+            Column("equipment_code", String(50)),
+            Column("rank_no", Integer),
+            Column("avg_delay_time", Double),
+            Column("affected_vehicle_count", Integer),
+            Column("risk_score", Double),
+            Column("detected_at", DateTime),
+            Column("created_at", DateTime, nullable=False, server_default=func.current_timestamp()),
+            Column(
+                "updated_at",
+                DateTime,
+                nullable=False,
+                server_default=func.current_timestamp(),
+                server_onupdate=func.current_timestamp(),
+            ),
             Index("idx_bottleneck_analysis_result_rank", "rank_no"),
-            Index("idx_bottleneck_analysis_result_history_id", "product_process_history_id"),
         )
         self.engine = create_engine(
             self.database_url,
-            # MySQL 세션 함수(now 등)를 서비스 기준 타임존과 맞춤
             connect_args=mysql_connect_args_for_seoul(self.database_url),
             pool_pre_ping=True,
             future=True,
         )
+        self.event_engine = create_engine(
+            self.event_database_url,
+            connect_args=mysql_connect_args_for_seoul(self.event_database_url),
+            pool_pre_ping=True,
+            future=True,
+        )
+
+    def _align_result_schema(self) -> None:
+        if self.engine.dialect.name != "mysql":
+            return
+
+        from sqlalchemy import inspect, text
+
+        table_name = "bottleneck_analysis_result"
+        inspector = inspect(self.engine)
+        if not inspector.has_table(table_name):
+            return
+
+        columns = {
+            column["name"]
+            for column in inspector.get_columns(table_name)
+        }
+        expected_columns = {
+            "manufacturing_event_id": "BIGINT NULL",
+            "car_master_id": "BIGINT NULL",
+            "process_code": "ENUM('PRESS','BODY','PAINT','ASSEMBLY') NULL",
+            "equipment_code": "VARCHAR(50) NULL",
+            "rank_no": "INT NULL",
+            "avg_delay_time": "DOUBLE NULL",
+            "affected_vehicle_count": "INT NULL",
+            "risk_score": "DOUBLE NULL",
+            "detected_at": "DATETIME NULL",
+            "created_at": "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": (
+                "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP "
+                "ON UPDATE CURRENT_TIMESTAMP"
+            ),
+        }
+        removed_columns = ("product_process_history_id", "station_code")
+
+        with self.engine.begin() as conn:
+            for column_name in removed_columns:
+                if column_name not in columns:
+                    continue
+                self._drop_column_constraints(conn, inspector, table_name, column_name)
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"DROP COLUMN {column_name}",
+                    ),
+                )
+                columns.remove(column_name)
+
+            for column_name, definition in expected_columns.items():
+                if column_name not in columns:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {table_name} "
+                            f"ADD COLUMN {column_name} {definition}",
+                        ),
+                    )
+                    columns.add(column_name)
+
+            conn.execute(
+                text(
+                    f"ALTER TABLE {table_name} "
+                    "MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
+                ),
+            )
+            if "detected_at" in columns:
+                conn.execute(
+                    text(
+                        f"UPDATE {table_name} "
+                        "SET detected_at = STR_TO_DATE("
+                        "LEFT(SUBSTRING_INDEX(REPLACE(detected_at, 'T', ' '), '+', 1), 19), "
+                        "'%Y-%m-%d %H:%i:%s'"
+                        ") "
+                        "WHERE detected_at IS NOT NULL "
+                        "AND CAST(detected_at AS CHAR) LIKE '%T%'",
+                    ),
+                )
+            conn.execute(
+                text(
+                    f"UPDATE {table_name} "
+                    "SET created_at = COALESCE(created_at, detected_at, CURRENT_TIMESTAMP), "
+                    "updated_at = COALESCE(updated_at, detected_at, CURRENT_TIMESTAMP)",
+                ),
+            )
+
+            for column_name, definition in expected_columns.items():
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"MODIFY COLUMN {column_name} {definition}",
+                    ),
+                )
+
+    @staticmethod
+    def _drop_column_constraints(
+        conn: Any,
+        inspector: Any,
+        table_name: str,
+        column_name: str,
+    ) -> None:
+        from sqlalchemy import text
+
+        for foreign_key in inspector.get_foreign_keys(table_name):
+            if column_name in foreign_key.get("constrained_columns", []):
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"DROP FOREIGN KEY {foreign_key['name']}",
+                    ),
+                )
+
+        index_names = {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if column_name in index.get("column_names", [])
+        }
+        for index_name in index_names:
+            conn.execute(text(f"DROP INDEX {index_name} ON {table_name}"))

@@ -1,66 +1,49 @@
-from typing import Any
+from __future__ import annotations
 
 from sqlalchemy import create_engine
-from sqlalchemy.dialects.mysql import insert
 
-from app.repository.sampledb_schema import equipment, metadata
+from app.repository.car_master_repository import CarMasterRepository
+from app.repository.equipment_repository import EquipmentRepository
+from app.repository.manufacturing_event_repository import (
+    ManufacturingEventRepository,
+)
+from app.repository.manufacturing_event_template_repository import (
+    ManufacturingEventTemplateRepository,
+)
+from app.repository.manufacturing_generation_job_repository import (
+    ManufacturingGenerationJobRepository,
+)
+from app.repository.sampledb_schema_manager import SampleDbSchemaManager
 from app.utils.database_utils import mysql_connect_args_for_seoul
 
 
-DEFAULT_EQUIPMENT_ROWS: list[dict[str, Any]] = [
-    {
-        "process_code": process_code,
-        "equipment_code": f"EQ_{process_code}_{index:03d}",
-        "equipment_name": f"{process_code.title()} equipment {index}",
-        "equipment_type": equipment_type,
-        "status": "NORMAL",
-    }
-    for process_code, equipment_type in (
-        ("PRESS", "HYDRAULIC_PRESS"),
-        ("BODY", "ROBOT_ARM"),
-        ("PAINT", "CAMERA"),
-        ("ASSEMBLY", "CONVEYOR"),
-    )
-    for index in range(1, 6)
-]
-
-
 class SampleDbRepository:
-    """제조 샘플 PRD에 정의된 sampledb 테이블을 생성하고 기본 데이터를 입력"""
+    """sampledb 전용 repository들을 같은 DB 연결로 묶는 facade다.
+
+    테이블별 SQL과 상태 관리 책임은 각 repository에 있고, 이 클래스는 서비스가
+    한 객체를 주입받아 사용할 수 있도록 구성 요소만 제공한다.
+    """
 
     def __init__(self, database_url: str) -> None:
-        """sampledb 연결에 사용할 SQLAlchemy 엔진을 생성."""
+        self.database_url = database_url
         self.engine = create_engine(
             database_url,
             connect_args=mysql_connect_args_for_seoul(database_url),
             pool_pre_ping=True,
             future=True,
         )
-
-    def ensure_schema(self) -> None:
-        """sampledb 엔티티가 없으면 생성"""
-        metadata.create_all(self.engine)
-
-    def seed_equipment(self) -> None:
-        """기본 설비 데이터를 입력하고 기존 데이터는 유지"""
-        statement = insert(equipment).values(DEFAULT_EQUIPMENT_ROWS)
-        update_columns = {
-            "equipment_name": statement.inserted.equipment_name,
-            "process_code": statement.inserted.process_code,
-            "equipment_type": statement.inserted.equipment_type,
-            "status": statement.inserted.status,
-        }
-        statement = statement.on_duplicate_key_update(**update_columns)
-
-        with self.engine.begin() as conn:
-            conn.execute(statement)
+        self.schema = SampleDbSchemaManager(self.engine)
+        self.cars = CarMasterRepository(self.engine)
+        self.equipment = EquipmentRepository(self.engine)
+        self.events = ManufacturingEventRepository(self.engine)
+        self.templates = ManufacturingEventTemplateRepository(self.engine)
+        self.jobs = ManufacturingGenerationJobRepository(self.engine)
 
     def initialize(self) -> None:
-        """스키마를 생성하고 PRD에 필요한 참조 데이터를 입력"""
-        self.ensure_schema()
-        self.seed_equipment()
+        self.schema.ensure_schema()
+        self.equipment.seed_defaults()
 
 
 def initialize_sampledb(database_url: str) -> None:
-    """sampledb 테이블과 참조 설비 데이터를 초기화"""
+    """sampledb 스키마와 기본 설비 데이터를 초기화한다."""
     SampleDbRepository(database_url).initialize()

@@ -1,0 +1,74 @@
+{
+  "press_to_body": {
+    "source_process_code": "PRESS",
+    "target_process_code": "BODY",
+    "threshold": 0.4376819769807411,
+    "feature_columns": [
+      "source_cycle_time_sec",
+      "source_station_delay_sec",
+      "source_queue_length",
+      "source_wip_count",
+      "source_current_rms_ampere",
+      "source_vibration_score",
+      "source_thermal_score"
+    ],
+    "scale_pos_weight": 3.639922667955534,
+    "best_params": {
+      "model__subsample": 0.95,
+      "model__reg_lambda": 8.0,
+      "model__num_leaves": 23,
+      "model__n_estimators": 220,
+      "model__min_child_samples": 60,
+      "model__learning_rate": 0.035,
+      "model__colsample_bytree": 0.8
+    }
+  },
+  "body_to_paint": {
+    "source_process_code": "BODY",
+    "target_process_code": "PAINT",
+    "threshold": 0.44474415478457285,
+    "feature_columns": [
+      "source_cycle_time_sec",
+      "source_station_delay_sec",
+      "source_queue_length",
+      "source_wip_count",
+      "source_current_rms_ampere",
+      "source_vibration_score",
+      "source_thermal_score"
+    ],
+    "scale_pos_weight": 3.5411542100283824,
+    "best_params": {
+      "model__subsample": 0.95,
+      "model__reg_lambda": 8.0,
+      "model__num_leaves": 23,
+      "model__n_estimators": 220,
+      "model__min_child_samples": 60,
+      "model__learning_rate": 0.035,
+      "model__colsample_bytree": 0.8
+    }
+  },
+  "paint_to_assembly": {
+    "source_process_code": "PAINT",
+    "target_process_code": "ASSEMBLY",
+    "threshold": 0.46001877207080666,
+    "feature_columns": [
+      "source_cycle_time_sec",
+      "source_station_delay_sec",
+      "source_queue_length",
+      "source_wip_count",
+      "source_current_rms_ampere",
+      "source_vibration_score",
+      "source_thermal_score"
+    ],
+    "scale_pos_weight": 3.841149773071104,
+    "best_params": {
+      "model__subsample": 0.95,
+      "model__reg_lambda": 8.0,
+      "model__num_leaves": 23,
+      "model__n_estimators": 220,
+      "model__min_child_samples": 60,
+      "model__learning_rate": 0.035,
+      "model__colsample_bytree": 0.8
+    }
+  }
+}

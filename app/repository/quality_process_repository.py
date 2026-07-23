@@ -1,0 +1,121 @@
+from sqlalchemy import text
+import pandas as pd
+
+from app.db import main_engine
+from app.kafka.consumer import create_consumer
+from app.kafka.topics import QUALITY_INSPECTION_PROCESS
+from app.kafka.options import PROCESS_GROUP
+
+
+def run(stop_event):
+
+    consumer = create_consumer(
+        topic=QUALITY_INSPECTION_PROCESS,
+        group_id=PROCESS_GROUP
+    )
+
+    try:
+
+        while not stop_event.is_set():
+
+            # 1초마다 종료 여부 확인
+            records = consumer.poll(timeout_ms=1000)
+
+            if not records:
+                continue
+
+            for _, messages in records.items():
+
+                for msg in messages:
+
+                    row = msg.value
+
+                    if "process_name" not in row:
+                        print("구버전 메시지 무시")
+                        continue
+
+                    total_vehicle_count = row["total_vehicle_count"]
+                    process_name = row["process_name"]
+                    completed_count = row["completed_count"]
+                    waiting_count = row["waiting_count"]
+                    progress_rate = row["progress_rate"]
+                    created_at = row["created_at"]
+
+                    # 같은 날짜 + 같은 공정 존재 여부 확인
+                    exists = pd.read_sql(
+                        text("""
+                            SELECT COUNT(*) AS cnt
+                            FROM inspection_process
+                            WHERE process_name = :process_name
+                            AND DATE(created_at) = DATE(:created_at)
+                        """),
+                        con=main_engine,
+                        params={
+                            "process_name": process_name,
+                            "created_at": created_at
+                        }
+                    )
+
+                    if exists.iloc[0]["cnt"] > 0:
+
+                        # UPDATE
+                        with main_engine.begin() as conn:
+
+                            conn.execute(
+                                text("""
+                                    UPDATE inspection_process
+                                    SET
+                                        completed_count = :completed_count,
+                                        waiting_count = :waiting_count,
+                                        progress_rate = :progress_rate,
+                                        process_status = :process_status
+                                    WHERE process_name = :process_name
+                                    AND DATE(created_at) = DATE(:created_at)
+                                """),
+                                {
+                                    "completed_count": completed_count,
+                                    "waiting_count": waiting_count,
+                                    "progress_rate": progress_rate,
+                                    "process_status":
+                                        "COMPLETE"
+                                        if progress_rate == 100
+                                        else "RUNNING",
+                                    "process_name": process_name,
+                                    "created_at": created_at
+                                }
+                            )
+
+                    else:
+
+                        # INSERT
+                        df = pd.DataFrame([{
+                            "process_name": process_name,
+                            "total_vehicle_count": total_vehicle_count,
+                            "completed_count": completed_count,
+                            "waiting_count": waiting_count,
+                            "progress_rate": progress_rate,
+                            "process_status":
+                                "COMPLETE"
+                                if progress_rate == 100
+                                else "RUNNING",
+                            "created_at": created_at
+                        }])
+
+                        df.to_sql(
+                            name="inspection_process",
+                            con=main_engine,
+                            if_exists="append",
+                            index=False
+                        )
+
+    except Exception as e:
+        print(f"오류 발생 : {e}")
+
+    finally:
+        print("process 종료")
+        consumer.close()
+
+
+if __name__ == "__main__":
+    import threading
+    run(threading.Event())

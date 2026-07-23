@@ -1,0 +1,323 @@
+name: Build AI Service and Update GitOps
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - "app/**"
+      - "main.py"
+      - "worker_main.py"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/deploy-ai-service.yml"
+
+  workflow_dispatch:
+
+concurrency:
+  group: ai-service-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  EKS_CLUSTER_NAME: aims-dev-eks
+  ECR_REPOSITORY: aims/ai-service
+  NAMESPACE: aims-project
+
+  INFRA_REPOSITORY: SK-Rookies-AIMS/infra
+  INFRA_BRANCH: dev
+  INFRA_MANIFEST_PATH: k8s/ai-service/kustomization.yaml
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout AI service repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          set -euo pipefail
+
+          if ! aws ecr describe-repositories \
+            --repository-names "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            > /dev/null 2>&1; then
+
+            aws ecr create-repository \
+              --repository-name "$ECR_REPOSITORY" \
+              --region "$AWS_REGION" \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+          fi
+
+      - name: Build and push Docker image
+        id: build-image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE_TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          BRANCH_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_REF_NAME}"
+
+          echo "Building image: $IMAGE_URI"
+
+          docker build \
+            -t "$IMAGE_URI" \
+            -t "$BRANCH_IMAGE_URI" \
+            .
+
+          docker push "$IMAGE_URI"
+          docker push "$BRANCH_IMAGE_URI"
+
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout infra repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INFRA_REPOSITORY }}
+          ref: ${{ env.INFRA_BRANCH }}
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+          fetch-depth: 0
+
+      - name: Update kubeconfig and ensure namespace
+        if: github.ref_name == 'dev'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER_NAME"
+
+          kubectl create namespace "$NAMESPACE" \
+            --dry-run=client \
+            -o yaml |
+          kubectl apply -f -
+
+      - name: Load AI service runtime parameters from SSM
+        if: github.ref_name == 'dev'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RDS_SECRET_ARN=$(aws ssm get-parameter \
+            --name "/aims/dev/rds/secret-arn" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          RDS_HOST=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/rds-host" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          RDS_PORT=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/rds-port" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          MAIN_DB_NAME=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/main-db-name" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          SAMPLE_DB_NAME=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/sample-db-name" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          REDIS_HOST=$(aws ssm get-parameter \
+            --name "/aims/dev/redis/host" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          REDIS_PORT=$(aws ssm get-parameter \
+            --name "/aims/dev/redis/port" \
+            --region "$AWS_REGION" \
+            --query "Parameter.Value" \
+            --output text)
+
+          JWT_SECRET_KEY=$(aws ssm get-parameter \
+            --name "/aims/dev/backend/jwt-secret-key" \
+            --region "$AWS_REGION" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text)
+
+          OPENAI_API_KEY=$(aws ssm get-parameter \
+            --name "/aims/dev/ai-service/openai-api-key" \
+            --region "$AWS_REGION" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text)
+
+          for VALUE in \
+            "$RDS_SECRET_ARN" \
+            "$RDS_HOST" \
+            "$RDS_PORT" \
+            "$MAIN_DB_NAME" \
+            "$SAMPLE_DB_NAME" \
+            "$REDIS_HOST" \
+            "$REDIS_PORT" \
+            "$JWT_SECRET_KEY" \
+            "$OPENAI_API_KEY"; do
+
+            if [ -z "$VALUE" ] || [ "$VALUE" = "None" ]; then
+              echo "Required AI service SSM parameter is empty"
+              exit 1
+            fi
+          done
+
+          echo "::add-mask::$RDS_SECRET_ARN"
+          echo "::add-mask::$JWT_SECRET_KEY"
+          echo "::add-mask::$OPENAI_API_KEY"
+
+          {
+            echo "RDS_SECRET_ARN=$RDS_SECRET_ARN"
+            echo "RDS_HOST=$RDS_HOST"
+            echo "RDS_PORT=$RDS_PORT"
+            echo "MAIN_DB_NAME=$MAIN_DB_NAME"
+            echo "SAMPLE_DB_NAME=$SAMPLE_DB_NAME"
+            echo "REDIS_HOST=$REDIS_HOST"
+            echo "REDIS_PORT=$REDIS_PORT"
+            echo "JWT_SECRET_KEY=$JWT_SECRET_KEY"
+            echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+          } >> "$GITHUB_ENV"
+
+      - name: Create or update AI service Secret
+        if: github.ref_name == 'dev'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SECRET_JSON=$(aws secretsmanager get-secret-value \
+            --secret-id "$RDS_SECRET_ARN" \
+            --region "$AWS_REGION" \
+            --query "SecretString" \
+            --output text)
+
+          DB_USER=$(echo "$SECRET_JSON" | jq -r '.username')
+          DB_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.password')
+
+          if [ -z "$DB_USER" ] || [ "$DB_USER" = "null" ]; then
+            echo "DB username is missing"
+            exit 1
+          fi
+
+          if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" = "null" ]; then
+            echo "DB password is missing"
+            exit 1
+          fi
+
+          DB_USER_ENCODED=$(printf '%s' "$DB_USER" | jq -sRr @uri)
+          DB_PASSWORD_ENCODED=$(printf '%s' "$DB_PASSWORD" | jq -sRr @uri)
+
+          MAIN_DATABASE_URL="mysql+pymysql://${DB_USER_ENCODED}:${DB_PASSWORD_ENCODED}@${RDS_HOST}:${RDS_PORT}/${MAIN_DB_NAME}?charset=utf8mb4"
+
+          REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}/0"
+
+          echo "::add-mask::$DB_USER"
+          echo "::add-mask::$DB_PASSWORD"
+          echo "::add-mask::$MAIN_DATABASE_URL"
+          echo "::add-mask::$REDIS_URL"
+          echo "::add-mask::$JWT_SECRET_KEY"
+
+          kubectl create secret generic ai-service-secret \
+            --namespace "$NAMESPACE" \
+            --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
+            --from-literal=JWT_SECRET_KEY="$JWT_SECRET_KEY" \
+            --from-literal=MAIN_DATABASE_URL="$MAIN_DATABASE_URL" \
+            --from-literal=DB_USER="$DB_USER" \
+            --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+            --from-literal=DB_HOST="$RDS_HOST" \
+            --from-literal=DB_PORT="$RDS_PORT" \
+            --from-literal=MAIN_DB_NAME="$MAIN_DB_NAME" \
+            --from-literal=SAMPLE_DB_NAME="$SAMPLE_DB_NAME" \
+            --from-literal=REDIS_URL="$REDIS_URL" \
+            --dry-run=client \
+            -o yaml |
+          kubectl apply -f -
+
+      - name: Update AI service image tag in GitOps repository
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST="infra/${INFRA_MANIFEST_PATH}"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Manifest not found: $MANIFEST"
+            exit 1
+          fi
+
+          IMAGE_TAG="${IMAGE_URI##*:}"
+
+          sed -i -E \
+            "s|^([[:space:]]*)newTag:.*$|\1newTag: ${IMAGE_TAG}|" \
+            "$MANIFEST"
+
+          echo "Updated AI service image tag:"
+          grep -n "newTag:" "$MANIFEST"
+
+          cd infra
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$INFRA_MANIFEST_PATH"
+
+          if git diff --cached --quiet; then
+            echo "Image tag is already up to date"
+            exit 0
+          fi
+
+          git diff --cached
+
+          git commit \
+            -m "chore(ai-service): deploy ${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
+
+          for ATTEMPT in 1 2 3; do
+            echo "GitOps push attempt: $ATTEMPT"
+
+            git pull --rebase origin "$INFRA_BRANCH"
+
+            if git push origin "HEAD:$INFRA_BRANCH"; then
+              echo "GitOps image update pushed successfully"
+              exit 0
+            fi
+
+            sleep $((ATTEMPT * 5))
+          done
+
+          echo "Failed to push AI service image update"
+          exit 1

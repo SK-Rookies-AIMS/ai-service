@@ -37,3 +37,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# DataSet
+datasets/
+
+# Docs
+app/docs/PRD_*.md
+app/docs/*.md
